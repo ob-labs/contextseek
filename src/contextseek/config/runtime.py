@@ -55,6 +55,14 @@ class RuntimeConfig:
     cold_storage_path: str = ".contextseek/cold"
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     api_keys: dict[str, ApiKeyPolicy] = field(default_factory=dict)
+    # OceanBase connection params (used when backend="oceanbase")
+    ob_host: str = "127.0.0.1"
+    ob_port: str = "2881"
+    ob_user: str = "root@test"
+    ob_password: str = ""
+    ob_db_name: str = "contextseek"
+    ob_table_name: str = "contextseek_items"
+    ob_vector_dims: int = 0
 
 
 def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
@@ -77,6 +85,13 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
         cold_storage_path=str(payload.get("cold_storage_path", ".contextseek/cold")),
         strategy=_strategy_from_dict(strategy_payload),
         api_keys=normalize_api_keys(dict(payload.get("api_keys", {}))),
+        ob_host=str(payload.get("ob_host", "127.0.0.1")),
+        ob_port=str(payload.get("ob_port", "2881")),
+        ob_user=str(payload.get("ob_user", "root@test")),
+        ob_password=str(payload.get("ob_password", "")),
+        ob_db_name=str(payload.get("ob_db_name", "contextseek")),
+        ob_table_name=str(payload.get("ob_table_name", "contextseek_items")),
+        ob_vector_dims=int(payload.get("ob_vector_dims", 0)),
     )
     return _with_home(config)
 
@@ -87,6 +102,22 @@ def build_adapter(config: RuntimeConfig) -> SeekVFSAdapter:
         backend = InMemoryBackend()
     elif config.backend == "file":
         backend = FileBackend(config.storage_path, scheme=config.uri_scheme)
+        backend.initialize()
+    elif config.backend == "oceanbase":
+        from contextseek.storage.ob_backend import OceanBaseBackend
+
+        if not config.ob_vector_dims:
+            msg = "ob_vector_dims must be set when backend=oceanbase"
+            raise ValueError(msg)
+        backend = OceanBaseBackend(
+            table_name=config.ob_table_name,
+            vector_dims=config.ob_vector_dims,
+            host=config.ob_host,
+            port=config.ob_port,
+            user=config.ob_user,
+            password=config.ob_password,
+            db_name=config.ob_db_name,
+        )
         backend.initialize()
     else:
         msg = f"unsupported backend: {config.backend}"
