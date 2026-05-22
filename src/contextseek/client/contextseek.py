@@ -129,17 +129,37 @@ def _auto_build_summarizer() -> Any | None:
     return build_summarizer(SummarizerSettings())
 
 
-def _build_adapter_from_settings(storage: Any) -> SeekVFSAdapter:
-    """Build a VFS-backed storage adapter from StorageSettings."""
+def _build_adapter_from_settings(settings: Any) -> SeekVFSAdapter:
+    """Build a VFS-backed storage adapter from ContextSeekSettings."""
     from seekvfs import VFS
 
     from contextseek.storage.file_backend import FileBackend
     from contextseek.storage.in_memory_backend import InMemoryBackend
     from contextseek.storage.storage_adapter import SeekVFSStorageAdapter
 
+    storage = settings.storage
     scheme = storage.uri_scheme
 
-    if storage.backend == "file":
+    if storage.backend == "oceanbase":
+        from contextseek.storage.ob_backend import OceanBaseBackend
+
+        ob = settings.ob
+        vector_dims = settings.embedding.dims
+        if not vector_dims:
+            raise ValueError(
+                "EMBEDDING_DIMS must be set when STORAGE_BACKEND=oceanbase"
+            )
+        backend: Any = OceanBaseBackend(
+            table_name=ob.table_name,
+            vector_dims=vector_dims,
+            host=ob.host,
+            port=ob.port,
+            user=ob.user,
+            password=ob.password,
+            db_name=ob.db_name,
+        )
+        backend.initialize()
+    elif storage.backend == "file":
         backend = FileBackend(root_dir=storage.path)
         backend.initialize()
     else:
@@ -1655,7 +1675,7 @@ class ContextSeek:
         strategy = to_strategy_config(settings)
 
         # 1. Build storage adapter
-        adapter = _build_adapter_from_settings(settings.storage)
+        adapter = _build_adapter_from_settings(settings)
 
         # 2. Build resolver
         resolver = ScopeResolver(uri_scheme=settings.storage.uri_scheme)
