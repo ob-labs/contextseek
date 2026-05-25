@@ -8,19 +8,13 @@
 
 Semantic context infrastructure for AI agents. [中文文档](README_CN.md)
 
-## What ContextSeek is
+## Overview
 
-ContextSeek is a context layer that sits between LLMs and agent runtimes. It gives agents a place to store, retrieve, and evolve context across sessions — without scattering that context across JSONL logs, vector stores, or separate memory services.
+Agent self-evolution is taking shape along two technical paths. One extracts and solidifies experience from runtime behavior (e.g. [Hermes](https://github.com/NousResearch/hermes-agent), [OpenHuman](https://github.com/tinyhumansai/openhuman)). The other evolves the **context infrastructure** beneath the agent—organizing, updating, and linking context automatically—without modifying agent execution logic.
 
-Everything is represented as a `ContextItem` — a single unit that carries content, provenance (where it came from and how confident the system is), links to related items, and maturity metadata. Items advance through a lifecycle — `raw → extracted → knowledge → skill` — that the system drives automatically, so agents do not manage tiering or summarization by hand.
+ContextSeek focuses on the latter. It turns one-off, task-level gains into compounding value across context lifecycles, so heterogeneous agent systems can share a single semantic layer for retrieval, provenance, and evolution.
 
-ContextSeek is storage-agnostic. InMemory and file backends work for development and single-process use. OceanBase adds hybrid HNSW vector + full-text search for production deployments.
-
-## Why it exists
-
-Agents accumulate runtime data quickly: execution traces, retrieved passages, tool results, user feedback. That data is often discarded at session end or scattered across multiple persistence layers with no consistent schema, source tracking, or quality metadata.
-
-ContextSeek starts from the assumption that context should be a first-class asset: retrievable by semantic query, auditable by provenance chain, and evolvable from raw observations toward refined knowledge. The same context can then serve retrieval during inference, debugging after a run, evaluation across trajectory comparisons, and offline training — without re-ingestion into separate pipelines.
+Three constraints still stand in the way: **heterogeneous integration**—Memory, Trace, and related components expose incompatible APIs and semantic conventions; **insufficient retention**—runtime experience is consumed in the prompt window and rarely becomes reusable capability; **missing provenance**—outputs lack traceable evidence chains. ContextSeek is a unified semantic context layer between LLMs and agent runtimes, converging these capabilities in a single object model: everything is a `ContextItem`, retrievable and traceable, with automatic progression through `raw → extracted → knowledge → skill`.
 
 ## Quick Start
 
@@ -64,14 +58,6 @@ Configure via `.env` (see [.env.example](.env.example)) or `ContextSeekSettings`
 - **EvolutionEngine** — watches for items that can be merged, resolved, advanced in stage, or distilled into skills. Runs incrementally after writes or on an explicit `compact()` call.
 - **DreamEngine** — idle-time pattern consolidation and cross-cluster hypothesis generation, triggered via `dream()`.
 - **HTTP + MCP servers** — expose the same operations over FastAPI and the Model Context Protocol for remote agent integrations.
-
-## Development
-
-```bash
-uv sync
-uv run pytest tests/ -q
-uv run python examples/full_pipeline_file.py
-```
 
 ## Related Projects
 
