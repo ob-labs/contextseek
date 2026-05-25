@@ -40,9 +40,7 @@ from contextseek.domain.geo import (
 from contextseek.storage.ob_backend import OceanBaseBackend
 
 try:
-    from sqlalchemy import Column, Index, String, Text, text
-    from sqlalchemy.dialects.mysql import LONGTEXT
-    from pyobvector import ObVecClient
+    from sqlalchemy import text
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "OceanBaseGeoBackend requires pyobvector and sqlalchemy. "

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)
@@ -240,7 +240,7 @@ __all__ = [
 # Register GIS-domain source types when this module is imported.
 # Any module that needs these types should import from contextseek.domain.geo
 # (or contextseek.storage.ob_geo_backend, which already does so).
-from contextseek.domain.provenance import register_source_type as _reg
+from contextseek.domain.provenance import register_source_type as _reg  # noqa: E402
 
 _reg("sensor_fusion",   confidence=0.88)  # multi-sensor fusion (LIDAR / camera / radar)
 _reg("v2x_message",     confidence=0.80)  # vehicle-to-everything broadcast
