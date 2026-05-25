@@ -1,9 +1,10 @@
 """ContextSeek × LangChain Agent Middleware.
 
-将 ContextSeek 的检索/存储/演化能力接入 LangChain ``create_agent()`` 流水线。
+Connects ContextSeek retrieval, storage, and evolution capabilities to a
+LangChain ``create_agent()`` pipeline.
 
-只增强 prompt，不控制流程；只旁路存储，不修改 agent state。
-默认 OceanBase 后端，优先复用 LangChain 已有的 model 与 embedder。
+Augments the prompt only — does not control the agent flow or modify agent state.
+Sidecars storage passively alongside the existing LangChain model and embedder.
 
 Usage::
 
@@ -526,7 +527,7 @@ class ContextSeekMiddleware(
 
     @staticmethod
     def _format_context_block(response: Any) -> str:
-        lines = ["\n[相关上下文]"]
+        lines = ["\n[Relevant Context]"]
         for hit in response.items:
             line = hit.item.summary or hit.item.abstract or ""
             if line:

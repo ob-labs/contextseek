@@ -141,23 +141,40 @@ def _build_adapter_from_settings(settings: Any) -> SeekVFSAdapter:
     scheme = storage.uri_scheme
 
     if storage.backend == "oceanbase":
-        from contextseek.storage.ob_backend import OceanBaseBackend
-
         ob = settings.ob
         vector_dims = settings.embedding.dims
         if not vector_dims:
             raise ValueError(
                 "EMBEDDING_DIMS must be set when STORAGE_BACKEND=oceanbase"
             )
-        backend: Any = OceanBaseBackend(
-            table_name=ob.table_name,
-            vector_dims=vector_dims,
-            host=ob.host,
-            port=ob.port,
-            user=ob.user,
-            password=ob.password,
-            db_name=ob.db_name,
-        )
+        geo = getattr(settings, "geo", None)
+        if geo is not None and getattr(geo, "enabled", False):
+            from contextseek.storage.ob_geo_backend import OceanBaseGeoBackend
+
+            backend: Any = OceanBaseGeoBackend(
+                table_name=ob.table_name,
+                vector_dims=vector_dims,
+                host=ob.host,
+                port=ob.port,
+                user=ob.user,
+                password=ob.password,
+                db_name=ob.db_name,
+                geo_table_name=geo.geo_table_name,
+                distance_decay_km=geo.distance_decay_km,
+                route_sample_interval_km=geo.route_sample_interval_km,
+            )
+        else:
+            from contextseek.storage.ob_backend import OceanBaseBackend
+
+            backend = OceanBaseBackend(
+                table_name=ob.table_name,
+                vector_dims=vector_dims,
+                host=ob.host,
+                port=ob.port,
+                user=ob.user,
+                password=ob.password,
+                db_name=ob.db_name,
+            )
         backend.initialize()
     elif storage.backend == "file":
         backend = FileBackend(root_dir=storage.path)
@@ -295,11 +312,7 @@ class ContextSeek:
         self._plugs.append(source)
         meta: PlugMeta = source.metadata()
 
-        # Resolve source_type string to enum
-        try:
-            source_type = SourceType(meta.source_type)
-        except ValueError:
-            source_type = SourceType.external_api
+        source_type: str = meta.source_type or "external_api"
 
         for event in source.stream():
             event_scope = scope or str(event.metadata.get("scope") or meta.name)
@@ -345,7 +358,7 @@ class ContextSeek:
         *,
         scope: str,
         source: str,
-        source_type: SourceType = SourceType.human_input,
+        source_type: str = SourceType.human_input,
         tags: list[str] | None = None,
         confidence: float | None = None,
         stage: Stage | None = None,
@@ -379,10 +392,10 @@ class ContextSeek:
         Raises:
             ValueError: If an exact duplicate already exists in the scope.
         """
-        # Callers (adapters, plugs) sometimes pass the enum value as a bare str.
-        # SourceType subclasses str, so use type(...) is str — not isinstance(..., str).
-        if type(source_type) is str:
-            source_type = SourceType(source_type)
+        # Normalize SourceType enum members to plain strings early so all
+        # downstream code (security checks, provenance, LLM prompts) sees str.
+        if isinstance(source_type, SourceType):
+            source_type = source_type.value
 
         if self._scope_lint:
             from contextseek.scope import ScopeLintWarning, _lint_scope
@@ -395,7 +408,7 @@ class ContextSeek:
 
             source_payload = {
                 "source": source,
-                "source_type": source_type.value,
+                "source_type": source_type,
                 "scope": scope,
             }
             if not source_allowed(source_payload, strategy=self.strategy.write):
@@ -518,6 +531,7 @@ class ContextSeek:
         tags: list[str] | None = None,
         filters: dict[str, Any] | None = None,
         include_deleted: bool = False,
+        geo_query: "Any | None" = None,
     ) -> RetrieveResponse:
         """Search stored context; defaults to L1 summaries, ``full=True`` returns L2 bodies.
 
@@ -575,6 +589,7 @@ class ContextSeek:
             stage=stage_filter,
             tags=tag_filter,
             include_deleted=include_deleted,
+            geo_query=geo_query,
         )
         hits = self._filter_readable_hits(hits, scope=scope)
         if min_conf is not None:
@@ -1843,14 +1858,14 @@ class ContextSeek:
 
     def _classify_stage_with_llm(
         self,
-        source_type: SourceType,
+        source_type: str,
         content: str | dict[str, Any],
         default_stage: Stage,
     ) -> Stage | None:
         content_text = str(content) if isinstance(content, dict) else content
         payload = self._invoke_llm_json(
             stage_classifier_prompt(
-                source_type=source_type.value,
+                source_type=source_type,
                 default_stage=default_stage.value,
                 content_text=content_text,
                 templates=self.llm_prompts,

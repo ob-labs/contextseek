@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from contextseek.domain.provenance import SOURCE_TYPE_CONFIDENCE, Provenance, SourceType
+from contextseek.domain.provenance import Provenance, SourceType, get_source_confidence
 from contextseek.domain.stages import STAGE_DEFAULT_STABILITY, Stability, Stage
 
 
-def infer_stage(source_type: SourceType, content: str | dict[str, Any]) -> Stage:
+def infer_stage(source_type: str, content: str | dict[str, Any]) -> Stage:
     """Infer the initial Stage from source_type and content structure."""
     # Human input and documents are trusted → knowledge directly
     if source_type in (SourceType.human_input, SourceType.document):
@@ -41,10 +41,10 @@ def infer_stage(source_type: SourceType, content: str | dict[str, Any]) -> Stage
 
 
 def infer_stage_with_classifier(
-    source_type: SourceType,
+    source_type: str,
     content: str | dict[str, Any],
     *,
-    classify_fn: Callable[[SourceType, str | dict[str, Any], Stage], Stage | None]
+    classify_fn: Callable[[str, str | dict[str, Any], Stage], Stage | None]
     | None = None,
 ) -> Stage:
     """Infer stage with optional LLM/classifier override.
@@ -64,7 +64,7 @@ def infer_stage_with_classifier(
     return base
 
 
-def infer_stability(stage: Stage, source_type: SourceType) -> Stability:
+def infer_stability(stage: Stage, source_type: str) -> Stability:
     """Infer Stability from stage and source_type."""
     # Explicit overrides
     if source_type == SourceType.human_input:
@@ -76,14 +76,14 @@ def infer_stability(stage: Stage, source_type: SourceType) -> Stability:
     return STAGE_DEFAULT_STABILITY.get(stage, Stability.transient)
 
 
-def infer_confidence(source_type: SourceType) -> float:
+def infer_confidence(source_type: str) -> float:
     """Infer confidence from source_type."""
-    return SOURCE_TYPE_CONFIDENCE.get(source_type, 0.5)
+    return get_source_confidence(source_type)
 
 
 def build_provenance(
     source: str,
-    source_type: SourceType,
+    source_type: str,
     confidence: float | None = None,
     created_by: str | None = None,
     context: str | None = None,

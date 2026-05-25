@@ -65,6 +65,8 @@ def build_embedder(settings: EmbeddingSettings) -> Callable[[str], list[float]] 
     init_kwargs = _normalize_legacy_openai_kwargs(init_kwargs)
     if settings.model:
         init_kwargs.setdefault("model", settings.model)
+    if settings.base_url:
+        init_kwargs.setdefault("base_url", settings.base_url)
 
     embeddings_instance = cls(**init_kwargs)
     dims = settings.dims or 1536  # fallback default
@@ -86,6 +88,8 @@ def build_llm(settings: LLMSettings) -> Any | None:
     init_kwargs = _normalize_legacy_openai_kwargs(init_kwargs)
     if settings.model:
         init_kwargs.setdefault("model", settings.model)
+    if settings.base_url:
+        init_kwargs.setdefault("base_url", settings.base_url)
 
     return cls(**init_kwargs)
 

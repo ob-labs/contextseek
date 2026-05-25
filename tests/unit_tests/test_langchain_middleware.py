@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-pytest.importorskip("langchain_core", reason="langchain extra not installed")
+pytest.importorskip("langchain", reason="langchain extra not installed")
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage  # noqa: E402
 

@@ -40,6 +40,39 @@ class SeekVFSAdapter(Protocol):
         """Delete payload by URI."""
 
 
+class GeoSearchMixin:
+    """Mixin that adds geo_search / is_point_within_zone to adapters backed by OceanBaseGeoBackend.
+
+    The default implementations return empty results so the retrieval pipeline
+    degrades gracefully when the backend is not geo-capable.
+    """
+
+    def geo_search(
+        self,
+        geo_query: "Any",
+        *,
+        prefix: str,
+        k: int,
+    ) -> list[dict]:
+        """Return payloads near / within the geo_query geometry.
+
+        Returns:
+            List of payload dicts with at least ``ref`` and ``score`` fields,
+            in the same format as :meth:`SeekVFSAdapter.search`.
+        """
+        return []
+
+    def is_point_within_zone(
+        self,
+        point: "Any",
+        *,
+        zone_type: str,
+        scope: str,
+    ) -> bool:
+        """Return True if *point* lies inside any polygon of *zone_type* within *scope*."""
+        return False
+
+
 class VectorSearchMixin:
     """Mixin that adds vector_search to adapters backed by a vector store.
 

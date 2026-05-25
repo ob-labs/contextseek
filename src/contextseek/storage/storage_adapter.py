@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 from typing import TYPE_CHECKING
 
+from contextseek.storage.protocol import GeoSearchMixin
 from contextseek.storage.protocol import SeekVFSAdapter
 from contextseek.storage.protocol import VectorSearchMixin
 from contextseek.domain.levels import ContentLevel
@@ -28,7 +29,7 @@ def _json_default(o: Any) -> Any:
     raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
 
 
-class SeekVFSStorageAdapter(VectorSearchMixin, SeekVFSAdapter):
+class SeekVFSStorageAdapter(GeoSearchMixin, VectorSearchMixin, SeekVFSAdapter):
     """Bridge `seekvfs.VFS` to contextseek's storage protocol.
 
     Translates contextseek's `contextseek://` refs to the VFS's own scheme
@@ -227,6 +228,41 @@ class SeekVFSStorageAdapter(VectorSearchMixin, SeekVFSAdapter):
                 hit["ref"] = self._to_outer(str(hit["ref"]))
             out.append(hit)
         return out
+
+    def geo_search(
+        self,
+        geo_query: Any,
+        *,
+        prefix: str,
+        k: int,
+    ) -> list[dict[str, Any]]:
+        """Delegate geo_search to the underlying OceanBaseGeoBackend if available."""
+        inner_prefix = self._to_inner(prefix)
+        path_pattern = f"{self._inner_scheme}{inner_prefix}*"
+        backend = self._resolve_backend(path_pattern)
+        if backend is None or not hasattr(backend, "geo_search"):
+            return []
+        raw: list[dict[str, Any]] = backend.geo_search(geo_query, prefix=prefix, k=k)
+        out: list[dict[str, Any]] = []
+        for hit in raw:
+            hit = dict(hit)
+            if "ref" in hit:
+                hit["ref"] = self._to_outer(str(hit["ref"]))
+            out.append(hit)
+        return out
+
+    def is_point_within_zone(self, point: Any, *, zone_type: str, scope: str) -> bool:
+        """Delegate is_point_within_zone to the underlying OceanBaseGeoBackend if available."""
+        inner_prefix = self._to_inner(scope)
+        path_pattern = f"{self._inner_scheme}{inner_prefix}*"
+        backend = self._resolve_backend(path_pattern)
+        if backend is None or not hasattr(backend, "is_point_within_zone"):
+            return False
+        # Namespace column stores full URI — build it from the scope
+        full_scope = _EXT_SCHEME + scope.strip("/")
+        return backend.is_point_within_zone(
+            point, zone_type=zone_type, scope=full_scope
+        )
 
 
 __all__ = ["SeekVFSStorageAdapter"]

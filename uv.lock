@@ -198,6 +198,7 @@ name = "contextseek"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "langchain-openai" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
@@ -251,6 +252,7 @@ requires-dist = [
     { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.3.0" },
     { name = "langchain-huggingface", marker = "extra == 'huggingface'", specifier = ">=0.1.0" },
     { name = "langchain-ollama", marker = "extra == 'ollama'", specifier = ">=0.3.0" },
+    { name = "langchain-openai", specifier = ">=1.1.10" },
     { name = "langchain-openai", marker = "extra == 'openai'", specifier = ">=0.3.0" },
     { name = "langgraph", marker = "extra == 'langchain'", specifier = ">=0.2.0" },
     { name = "openai", marker = "extra == 'appworld-eval'", specifier = ">=1.0.0" },

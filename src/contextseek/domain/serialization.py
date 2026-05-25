@@ -7,7 +7,7 @@ from typing import Any
 
 from contextseek.domain.context_item import ContextItem
 from contextseek.domain.links import Link, LinkType
-from contextseek.domain.provenance import Provenance, SourceType
+from contextseek.domain.provenance import Provenance
 from contextseek.domain.stages import Stability, Stage
 
 
@@ -91,7 +91,7 @@ def deserialize_context_item(payload: dict[str, Any]) -> ContextItem:
 
 def _serialize_provenance(p: Provenance) -> dict[str, Any]:
     d: dict[str, Any] = {
-        "source_type": p.source_type.value,
+        "source_type": p.source_type,
         "source_id": p.source_id,
         "confidence": p.confidence,
         "verified": p.verified,
@@ -105,7 +105,7 @@ def _serialize_provenance(p: Provenance) -> dict[str, Any]:
 
 def _deserialize_provenance(d: dict[str, Any]) -> Provenance:
     return Provenance(
-        source_type=SourceType(d["source_type"]),
+        source_type=d["source_type"],
         source_id=d["source_id"],
         confidence=d.get("confidence", 1.0),
         verified=d.get("verified", False),

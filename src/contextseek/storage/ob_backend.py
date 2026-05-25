@@ -155,7 +155,13 @@ def _merge_hoisted(
         d = dict(payload_json)
     else:
         d = {}
-    d["content"] = content or ""
+    if content:
+        try:
+            d["content"] = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            d["content"] = content
+    else:
+        d["content"] = ""
     d["abstract"] = abstract or ""
     d["summary"] = summary or ""
     emb = _parse_vector(abstract_embedding)
@@ -406,7 +412,12 @@ class OceanBaseBackend(BackendProtocol):
             )
         abstract = str(payload.get("abstract") or "")
         summary = str(payload.get("summary") or "")
-        text_content = str(payload.get("content") or "")
+        raw_content = payload.get("content")
+        text_content = (
+            json.dumps(raw_content, ensure_ascii=False)
+            if isinstance(raw_content, (dict, list))
+            else str(raw_content or "")
+        )
         abstract_emb = payload.get("embedding")
         # FTS surface: prefer abstract+summary (L0/L1 granularity); fall back to
         # full text when both are empty for backward compatibility.

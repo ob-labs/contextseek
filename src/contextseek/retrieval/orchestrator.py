@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from time import perf_counter
-from typing import Callable
+from typing import Any, Callable
 
 from contextseek.storage.protocol import SeekVFSAdapter
 from contextseek.config import RetrievalStrategy
@@ -14,6 +14,7 @@ from contextseek.domain.serialization import deserialize_context_item
 from contextseek.domain.stages import STAGE_CONFIDENCE, Stage
 from contextseek.retrieval.components import (
     DefaultRecallRoute,
+    GeoRecallRoute,
     HeuristicReranker,
     HybridRecallRoute,
     RecallRoute,
@@ -75,6 +76,7 @@ class RetrievalOrchestrator:
         tags: list[str] | None = None,
         include_deleted: bool = False,
         with_stats: bool = False,
+        geo_query: Any | None = None,
     ) -> list[SearchHit] | tuple[list[SearchHit], RetrievalStats]:
         """Recall, dedupe, rerank and return SearchHit results.
 
@@ -109,6 +111,24 @@ class RetrievalOrchestrator:
                     routed = dict(item)
                     routed["_recall_path"] = recall_query.route_name
                     raw_hits.append(routed)
+
+        # ─── Geo recall (optional, runs alongside other routes) ────
+        if geo_query is not None:
+            geo_route = GeoRecallRoute()
+            for prefix in prefixes:
+                for geo_rq in geo_route.build_queries(
+                    query, strategy, geo_query=geo_query
+                ):
+                    recall_paths.add(geo_rq.route_name)
+                    for item in geo_route.recall(
+                        self.adapter,
+                        prefix=prefix,
+                        recall_query=geo_rq,
+                        k=recall_limit,
+                    ):
+                        routed = dict(item)
+                        routed["_recall_path"] = geo_rq.route_name
+                        raw_hits.append(routed)
 
         # ─── Filter: deleted, stage, tags ─────────────────────────
         if not include_deleted:
@@ -146,7 +166,7 @@ class RetrievalOrchestrator:
 
         # ─── Rerank ───────────────────────────────────────────────
         reranked = reranker.rerank(
-            list(merged.values()), query=query, strategy=strategy
+            list(merged.values()), query=query, strategy=strategy, geo_query=geo_query
         )
         limited = reranked[:k]
 
@@ -193,7 +213,7 @@ class RetrievalOrchestrator:
 def _build_provenance_summary(item: ContextItem) -> str:
     """Build a human-readable one-line provenance description."""
     prov = item.provenance
-    source = prov.source_type.value.replace("_", " ")
+    source = prov.source_type.replace("_", " ")
     parts = [f"source: {source}"]
     if prov.context:
         parts.append(prov.context)

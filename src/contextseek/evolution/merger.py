@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime, timezone
-from typing import Callable
+from typing import Any, Callable
 
 from contextseek.domain.context_item import ContextItem, _generate_id, _utc_now
 from contextseek.domain.links import Link, LinkType
@@ -177,3 +177,77 @@ class ConvergenceMerger:
         if a.embedding and b.embedding:
             return embedding_similarity(a.embedding, b.embedding)
         return semantic_similarity(a.content_text, b.content_text)
+
+
+class GeoAwareMerger(ConvergenceMerger):
+    """Extends ConvergenceMerger with a spatial-distance merge trigger.
+
+    When two ContextItems both carry ``content["geo"]`` coordinates and
+    their Haversine distance is below *spatial_merge_threshold_m*, they are
+    eligible for merge even if their embedding similarity is below the
+    semantic threshold.
+
+    Useful when the same real-world location is recorded multiple times with
+    slightly different textual content (e.g. repeated coordinate updates).
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        spatial_merge_threshold_m: float = 500.0,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._spatial_threshold_m = spatial_merge_threshold_m
+
+    def _similarity(self, a: ContextItem, b: ContextItem) -> float:
+        # 1. Try semantic / embedding similarity first (from parent)
+        base_sim = super()._similarity(a, b)
+        if base_sim >= self._threshold:
+            return base_sim
+
+        # 2. Fall back to spatial proximity check
+        geo_a = _geo_coords(a)
+        geo_b = _geo_coords(b)
+        if geo_a is None or geo_b is None:
+            return base_sim
+
+        dist_m = _haversine_m(geo_a, geo_b)
+        if dist_m <= self._spatial_threshold_m:
+            # Return a similarity just above threshold to trigger merge
+            return self._threshold + 0.01
+        return base_sim
+
+
+def _geo_coords(item: ContextItem) -> tuple[float, float] | None:
+    """Extract (lat, lon) from item.content["geo"] if present."""
+    content = item.content
+    if not isinstance(content, dict):
+        return None
+    geo = content.get("geo")
+    if not isinstance(geo, dict):
+        return None
+    lat = geo.get("lat")
+    lon = geo.get("lon")
+    if lat is None or lon is None:
+        return None
+    try:
+        return (float(lat), float(lon))
+    except (TypeError, ValueError):
+        return None
+
+
+def _haversine_m(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Haversine distance in metres between two (lat, lon) pairs."""
+    import math
+
+    r = 6_371_000.0  # Earth radius in metres
+    lat1, lon1 = math.radians(a[0]), math.radians(a[1])
+    lat2, lon2 = math.radians(b[0]), math.radians(b[1])
+    d_lat = lat2 - lat1
+    d_lon = lon2 - lon1
+    h = (
+        math.sin(d_lat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(d_lon / 2) ** 2
+    )
+    return r * 2 * math.asin(math.sqrt(h))

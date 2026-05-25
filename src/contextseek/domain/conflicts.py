@@ -198,6 +198,7 @@ _NEGATION_MARKERS = frozenset(
         "wasn't",
         "weren't",
         "no longer",
+        # CJK negation markers for Chinese-language content analysis
         "不",
         "不要",
         "不能",

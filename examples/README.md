@@ -1,104 +1,61 @@
 # Examples
 
-## 1) Full pipeline with FileBackend
+示例按依赖复杂度分为三组，建议按顺序探索。
+
+## [basic/](basic/) — 入门示例
+
+依赖最小，适合初次了解 ContextSeek。
+
+| 文件 | 后端 | 说明 |
+|---|---|---|
+| `pipeline_file.py` | FileBackend（无需外部服务） | 本地文件后端，关键词检索 |
+| `pipeline_ob.py` | OceanBase | 向量 + 全文混合检索 |
+| `langchain.py` | FileBackend | LangChain Memory / Retriever 桥接 |
 
 ```bash
-uv run python examples/full_pipeline_file.py
+uv run python examples/basic/pipeline_file.py  # 零外部依赖，推荐首选
 ```
 
-Demonstrates:
-- FileBackend local file storage (zero external deps)
-- Adding ContextItems with different source types
-- `retrieve(kind=hits)` keyword-style ranked hits
-- RetrievalOrchestrator for low-level retrieval control
+## [advanced/](advanced/) — 完整能力展示
 
-## 2) Full pipeline with OceanBase
+涵盖 LLM 集成、演进流水线、DataPlug 扩展。
+
+| 文件 | 依赖 | 说明 |
+|---|---|---|
+| `research_agent.py` | 仅项目本身 | 所有核心功能综合演示（推荐） |
+| `llm_full_pipeline_ob.py` | OB + LLM API | Phase 1/2/3 完整 LLM 流水线 |
+| `powermem_minimal.py` | 仅项目本身 | PowerMem 最小集成路径（~50 行） |
+| `powermem_plug.py` | 可选 powermem | PowerMem DataPlug 完整演示 |
 
 ```bash
-uv run python examples/full_pipeline_ob.py
+uv run python examples/advanced/research_agent.py  # 推荐：零外部依赖的完整演示
 ```
 
-Demonstrates:
-- OceanBase as vector + full-text hybrid backend
-- LangChain embedder integration
-- Semantic `retrieve(kind=hits)` with hybrid recall
+## [gis/](gis/) — 地理空间场景
 
-## 3) LangChain bridges
+需要 OceanBase >= 4.2.2 且 `GEO_ENABLED=true`。
+
+| 文件 | 场景 |
+|---|---|
+| `poi_search.py` | 地图 POI 关键词 + 地理混合搜索 |
+| `ride_hailing.py` | 打车调度：司机 / 订单 / 热力区域 |
+| `autonomous_driving.py` | 智能驾驶：HD 地图 / ODD / 道路事件 |
 
 ```bash
-PYTHONPATH=src python examples/langchain_pipeline.py
+GEO_ENABLED=true uv run python examples/gis/poi_search.py
 ```
 
-Demonstrates:
-- `ContextSeekMemory` for chat history persistence
-- `ContextSeekRetriever` for context retrieval
-- LangChain adapter usage (not DataPlugs)
+---
 
-## 4) Research Agent Demo (comprehensive)
+## HTTP API
 
-```bash
-uv run python examples/research_agent_demo.py
-```
-
-Showcases all ContextSeek capabilities:
-- ContextItem with multiple source types and provenance
-- Links between items (supports/refutes/supersedes)
-- Evolution pipeline (raw → extracted → knowledge → skill)
-- `retrieve(kind=hits)` vs `retrieve(kind=context)` (ranked vs budgeted)
-- Trace ingestion and training data export
-- Strategy routing with canary rules
-- Context injection for LLM prompts
-- Skill execution framework
-
-## 5) PowerMem integration
-
-**Only need memories?** Keep using PowerMem `memory.add` / `memory.search` — ContextSeek is optional.
-
-**Need memories + trace/RAG/playbook in one `retrieve()`?** Plug then query ContextSeek:
-
-```python
-from contextseek.plugs import PowerMemPlug
-
-ctx.plug(
-    PowerMemPlug.from_memory(memory, user_id="...", agent_id="..."),
-    scope="tenant/bot/user",
-)
-hits = ctx.retrieve(query, scope="tenant/bot/user")
-```
-
-Minimal example:
-
-```bash
-uv run python examples/powermem_minimal.py
-```
-
-Full DataPlug walkthrough:
-
-```bash
-uv run python examples/powermem_plug_demo.py
-```
-
-Demonstrates:
-- ContextSeek as a **DataPlug socket**: `PowerMemPlug` imports PowerMem `get_all` rows
-- `PowerMemPlug.from_records()` — normalize PowerMem search/get_all dicts
-- Same-scope unified `retrieve()` over PowerMem memories + ContextSeek-native knowledge
-- Provenance (`powermem://<id>`) and `powermem` tags for filtering
-
-Optional live PowerMem (requires `pip install powermem` or sibling repo on `PYTHONPATH`):
-
-```bash
-USE_POWERMEM=live uv run python examples/powermem_plug_demo.py
-```
-
-## 6) HTTP API
-
-Start API server:
+启动 API 服务：
 
 ```bash
 uvicorn contextseek.http.server:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Example requests:
+示例请求：
 
 ```bash
 curl -X POST http://127.0.0.1:8000/add \
@@ -110,18 +67,4 @@ curl -X POST http://127.0.0.1:8000/retrieve \
   -d '{"query": "hello", "scope": "t/p/u", "k": 5}'
 ```
 
-Endpoints: `/add`, `/retrieve`, `/expand`, `/compact`, `/forget`, `/delete`, `/health`
-
-## 7) Real LLM + OceanBase full pipeline
-
-Run:
-
-```bash
-uv run python examples/llm_full_pipeline_oceanbase.py
-```
-
-What it covers:
-- Real LLM calls with OceanBase backend
-- Phase 1/2/3 LLM features end-to-end
-- Prompt-template override via `PromptSettings` (`PROMPT_*`)
-- Retrieval, compact/evolution, dream, feedback, and skill inspection
+端点：`/add`、`/retrieve`、`/expand`、`/compact`、`/forget`、`/delete`、`/health`

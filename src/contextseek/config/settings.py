@@ -153,6 +153,9 @@ class EmbeddingSettings(BaseSettings):
     dims: int = 0
     """Vector dimensions (required when provider != "none")."""
 
+    base_url: str = ""
+    """Optional base URL for compatible endpoints (e.g. EMBEDDING_BASE_URL in .env)."""
+
     kwargs: dict[str, Any] = Field(default_factory=dict)
     """Extra keyword arguments forwarded to the provider constructor."""
 
@@ -170,6 +173,9 @@ class LLMSettings(BaseSettings):
 
     model: str = ""
     """Model name passed to the provider constructor."""
+
+    base_url: str = ""
+    """Optional base URL for compatible endpoints (e.g. LLM_BASE_URL in .env)."""
 
     kwargs: dict[str, Any] = Field(default_factory=dict)
     """Extra keyword arguments forwarded to the provider constructor."""
@@ -293,6 +299,36 @@ class ObservabilitySettings(BaseSettings):
     trace_sample_rate: float = 1.0
 
 
+class GeoSettings(BaseSettings):
+    """GIS feature configuration. Requires STORAGE_BACKEND=oceanbase and OceanBase >= 4.2.2."""
+
+    model_config = nested_section_config("GEO_")
+
+    enabled: bool = False
+    """Enable GIS support. When true, OceanBaseGeoBackend replaces OceanBaseBackend."""
+
+    geo_table_name: str = "contextseek_geo"
+    """Name of the spatial index table."""
+
+    srid: int = 4326
+    """Spatial reference system ID (default: WGS84)."""
+
+    default_radius_km: float = 10.0
+    """Default search radius in kilometres when GeoQuery.radius_km is not set."""
+
+    distance_decay_km: float = 1.0
+    """Distance decay unit in km: score halves every N km (geo_sim = 1 / (1 + dist / (N * 1000)))."""
+
+    geo_weight: float = 0.4
+    """Weight of the geo recall route in RRF fusion (0.0–1.0)."""
+
+    route_sample_interval_km: float = 0.5
+    """Keypoint sampling interval in km for route-corridor queries."""
+
+    spatial_merge_threshold_m: float = 500.0
+    """GeoAwareMerger: trigger spatial merge when two items are within this distance (metres)."""
+
+
 class LifecycleSettings(BaseSettings):
     """Lifecycle scheduler tuning."""
 
@@ -338,6 +374,7 @@ class ContextSeekSettings(BaseSettings):
 
     storage: StorageSettings = Field(default_factory=StorageSettings)
     ob: OceanBaseSettings = Field(default_factory=OceanBaseSettings)
+    geo: GeoSettings = Field(default_factory=GeoSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     llm: LLMSettings = Field(default_factory=LLMSettings)
     summarizer: SummarizerSettings = Field(default_factory=SummarizerSettings)
@@ -432,6 +469,7 @@ def to_strategy_config(settings: ContextSeekSettings) -> "StrategyConfig":
 
 __all__ = [
     "EmbeddingSettings",
+    "GeoSettings",
     "OceanBaseSettings",
     "EvolutionSettings",
     "LLMSettings",

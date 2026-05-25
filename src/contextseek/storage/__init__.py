@@ -12,6 +12,7 @@ from contextseek.storage.vector_memory_adapter import VectorMemoryAdapter
 
 __all__ = [
     "SeekVFSAdapter",
+    "GeoSearchMixin",
     "VectorSearchMixin",
     "InMemoryBackend",
     "FileBackend",
@@ -19,6 +20,7 @@ __all__ = [
     "TieredSeekVFSAdapter",
     "VectorMemoryAdapter",
     "OceanBaseBackend",
+    "OceanBaseGeoBackend",
 ]
 
 
@@ -28,4 +30,12 @@ def __getattr__(name: str):
         from contextseek.storage.ob_backend import OceanBaseBackend
 
         return OceanBaseBackend
+    if name == "OceanBaseGeoBackend":
+        from contextseek.storage.ob_geo_backend import OceanBaseGeoBackend
+
+        return OceanBaseGeoBackend
+    if name == "GeoSearchMixin":
+        from contextseek.storage.protocol import GeoSearchMixin
+
+        return GeoSearchMixin
     raise AttributeError(name)

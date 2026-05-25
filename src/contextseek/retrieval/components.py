@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+from dataclasses import dataclass, field
+from typing import Any, Callable
 from typing import Protocol
 import re
 
 from contextseek.storage.protocol import SeekVFSAdapter
 from contextseek.config import RetrievalStrategy
+from contextseek.policies.decay import geo_decay_score
 
 
 _TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff]+", re.UNICODE)
@@ -28,6 +29,7 @@ class RecallQuery:
 
     route_name: str
     query: str
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class RecallRoute(Protocol):
@@ -58,6 +60,7 @@ class Reranker(Protocol):
         *,
         query: str,
         strategy: RetrievalStrategy,
+        geo_query: Any | None = None,
     ) -> list[dict[str, object]]:
         """Return candidates ordered by relevance."""
 
@@ -178,9 +181,12 @@ class HeuristicReranker:
         *,
         query: str,
         strategy: RetrievalStrategy,
+        geo_query: Any | None = None,
     ) -> list[dict[str, object]]:
         for item in candidates:
-            item["_score"] = self.rank_score(item, query=query, strategy=strategy)
+            item["_score"] = self.rank_score(
+                item, query=query, strategy=strategy, geo_query=geo_query
+            )
         return sorted(
             candidates,
             key=lambda item: float(item.get("_score", 0.0)),
@@ -189,7 +195,11 @@ class HeuristicReranker:
 
     @staticmethod
     def rank_score(
-        item: dict[str, object], *, query: str, strategy: RetrievalStrategy
+        item: dict[str, object],
+        *,
+        query: str,
+        strategy: RetrievalStrategy,
+        geo_query: Any | None = None,
     ) -> float:
         base = float(item.get("score", 0.0))
         query_tokens = set(tokens(query))
@@ -220,6 +230,13 @@ class HeuristicReranker:
             base *= max(0.0, 1.0 - strategy.archive_penalty)
         elif tier == "warm":
             base *= max(0.0, 1.0 - strategy.archive_penalty / 2)
+        # Geo spatial decay: penalise items far from query center
+        if geo_query is not None and getattr(geo_query, "center", None) is not None:
+            content = item.get("content", {})
+            item_geo = content.get("geo") if isinstance(content, dict) else None
+            base *= geo_decay_score(
+                item_geo, geo_query.center, decay_km=strategy.distance_decay_km
+            )
         return round(base, 6)
 
 
@@ -259,9 +276,12 @@ class LLMReranker:
         *,
         query: str,
         strategy: RetrievalStrategy,
+        geo_query: Any | None = None,
     ) -> list[dict[str, object]]:
         # First pass: use inner reranker to pre-sort and reduce candidate set
-        pre_ranked = self._inner.rerank(candidates, query=query, strategy=strategy)
+        pre_ranked = self._inner.rerank(
+            candidates, query=query, strategy=strategy, geo_query=geo_query
+        )
         # Limit LLM calls to top_n candidates if configured
         to_score = pre_ranked[: self._top_n] if self._top_n else pre_ranked
         remainder = pre_ranked[self._top_n :] if self._top_n else []
@@ -300,8 +320,11 @@ class RelationAwareReranker:
         *,
         query: str,
         strategy: RetrievalStrategy,
+        geo_query: Any | None = None,
     ) -> list[dict[str, object]]:
-        ranked = self._inner.rerank(candidates, query=query, strategy=strategy)
+        ranked = self._inner.rerank(
+            candidates, query=query, strategy=strategy, geo_query=geo_query
+        )
         for item in ranked:
             score = float(item.get("_score", 0.0))
             relation_type = str(item.get("relation_type", "")).lower()
@@ -333,3 +356,45 @@ def _content_for_score(item: dict[str, object]) -> str:
         str(item.get("tags", "")),
     ]
     return " ".join(parts).lower()
+
+
+class GeoRecallRoute:
+    """Spatial recall route that runs alongside phrase / vector routes in RRF fusion.
+
+    Activated when ``"geo"`` is listed in ``RETRIEVAL_RECALL_ROUTES``.
+    The ``geo_query`` is carried via ``RecallQuery.metadata`` and injected by
+    the orchestrator when ``build_queries`` is called.
+
+    Silently returns an empty list when the adapter does not support
+    ``geo_search`` (i.e. the backend is not geo-capable), so other routes
+    are unaffected.
+    """
+
+    def build_queries(
+        self,
+        query: str,
+        strategy: RetrievalStrategy,
+        *,
+        geo_query: Any | None = None,
+    ) -> list[RecallQuery]:
+        if geo_query is None or "geo" not in set(strategy.recall_routes):
+            return []
+        return [RecallQuery("geo", query, metadata={"geo_query": geo_query})]
+
+    def recall(
+        self,
+        adapter: SeekVFSAdapter,
+        *,
+        prefix: str,
+        recall_query: RecallQuery,
+        k: int,
+    ) -> list[dict[str, object]]:
+        geo_query = recall_query.metadata.get("geo_query")
+        if geo_query is None:
+            return []
+        if not hasattr(adapter, "geo_search"):
+            return []
+        try:
+            return adapter.geo_search(geo_query, prefix=prefix, k=k)  # type: ignore[union-attr]
+        except Exception:
+            return []

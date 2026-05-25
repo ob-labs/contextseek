@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+
 from contextseek.domain.context_item import ContextItem
 from contextseek.domain.stages import Stability
 
@@ -109,6 +110,58 @@ def compute_decay(
 
     new_importance = item.importance * decay_factor + access_bonus
     return max(0.0, min(1.0, new_importance))
+
+
+def geo_decay_score(
+    item_geo: Any | None,
+    query_center: Any | None,
+    *,
+    decay_km: float = 1.0,
+) -> float:
+    """Spatial decay factor: score decreases as distance from the query center grows.
+
+    Applied in the reranker stage to candidates that carry geo coordinates.
+    Does not modify stored item data.
+
+    Args:
+        item_geo: ``content["geo"]`` dict with ``lat``/``lon``, or ``None``.
+        query_center: A ``GeoPoint`` object, or ``None``.
+        decay_km: Decay unit in km — score halves every this many kilometres.
+
+    Returns:
+        A decay factor in ``[0.0, 1.0]``. Returns 1.0 (no decay) when either
+        argument is ``None``.
+    """
+    if item_geo is None or query_center is None:
+        return 1.0
+
+    # item_geo may be a dict {"lat": ..., "lon": ...} or an object with lat/lon attributes
+    try:
+        if isinstance(item_geo, dict):
+            lat = float(item_geo["lat"])
+            lon = float(item_geo["lon"])
+        else:
+            lat = float(item_geo.lat)
+            lon = float(item_geo.lon)
+        q_lat = float(query_center.lat)
+        q_lon = float(query_center.lon)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return 1.0
+
+    dist_km = _haversine_km(lat, lon, q_lat, q_lon)
+    return 1.0 / (1.0 + dist_km / max(decay_km, 1e-9))
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    d_lat = math.radians(lat2 - lat1)
+    d_lon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(d_lat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(d_lon / 2) ** 2
+    )
+    return 6371.0 * 2 * math.asin(math.sqrt(a))
 
 
 def apply_decay(
