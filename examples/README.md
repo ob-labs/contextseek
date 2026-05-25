@@ -23,6 +23,7 @@ uv run python examples/basic/pipeline_file.py  # 零外部依赖，推荐首选
 | 文件 | 依赖 | 说明 |
 |---|---|---|
 | `research_agent.py` | 仅项目本身 | 所有核心功能综合演示（推荐） |
+| `evidence_chain.py` | 仅项目本身 | 证据链溯源：`upstream` / `evidence_chain` / `chain_confidence` |
 | `llm_full_pipeline_ob.py` | OB + LLM API | Phase 1/2/3 完整 LLM 流水线 |
 | `powermem_minimal.py` | 仅项目本身 | PowerMem 最小集成路径（~50 行） |
 | `powermem_plug.py` | 可选 powermem | PowerMem DataPlug 完整演示 |

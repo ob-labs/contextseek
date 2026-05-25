@@ -25,6 +25,24 @@ uv run python examples/advanced/research_agent.py
 
 ---
 
+## evidence_chain.py — 证据链与溯源 API 演示
+
+```bash
+uv run python examples/advanced/evidence_chain.py
+```
+
+**依赖：** 仅项目本身，无需额外安装。
+
+场景：SRE 故障排查，从监控告警、日志到回滚建议的多层证据 DAG。
+
+演示：
+- `derived_from` / `supported_by` / `refuted_by` 链接构建证据图
+- `upstream()` — 快速追溯来源
+- `evidence_chain()` — 完整 DAG、置信度传播、冲突检测、关键路径
+- `chain_confidence()` — 轻量置信度查询
+
+---
+
 ## llm_full_pipeline_ob.py — 真实 LLM + OceanBase 完整流水线
 
 ```bash

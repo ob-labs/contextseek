@@ -1,3 +1,14 @@
+# Release pipeline
+#
+# Typical flow (manual GitHub Release):
+#   1. Bump version in pyproject.toml and merge to main
+#   2. GitHub → Releases → Draft new release → create tag vX.Y.Z, write notes, Publish
+#   3. Tag push triggers this workflow: build wheel/sdist → publish PyPI → attach dist/* to the release
+#
+# Fallback (CLI tag only, no GitHub Release yet):
+#   git tag vX.Y.Z && git push origin vX.Y.Z
+#   → workflow creates the GitHub Release from RE.md if it does not exist
+
 name: Release
 
 on:
@@ -52,7 +63,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
 
   github-release:
-    needs: publish-pypi
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -65,11 +76,23 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Create GitHub Release
+      - name: Attach artifacts to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --notes "See [README.md](README.md) for usage and [pyproject.toml](pyproject.toml) for version details." \
-            dist/*
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists (manual or prior run); uploading dist/*."
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            echo "No release found for ${GITHUB_REF_NAME}; creating one from RE.md."
+            if [ -f RE.md ]; then
+              NOTES_FILE=RE.md
+            else
+              NOTES_FILE="$(mktemp)"
+              echo "See [README.md](README.md) for usage and [pyproject.toml](pyproject.toml) for version details." > "${NOTES_FILE}"
+            fi
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes-file "${NOTES_FILE}" \
+              dist/*
+          fi
