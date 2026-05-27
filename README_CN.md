@@ -45,8 +45,22 @@ for hit in ctx.retrieve("分布式数据库", scope="acme/db/engineer", k=10):
 - [客户端 API 参考](docs/zh/reference/api.md)：`add`、`retrieve`、`expand`、`compact`、`dream`、`evidence_chain` 等方法的完整签名。
 - [配置参考](docs/zh/getting-started/configuration.md)：所有环境变量与 `ContextSeekSettings` 字段。
 - [DataPlug 指南](docs/zh/guides/integrations/dataplugs.md)：如何从 RAG 流水线、记忆库、执行轨迹及工具注册表导入数据。
+- [LangChain Middleware](docs/zh/guides/integrations/langchain-middleware.md) / [English](docs/en/guides/integrations/langchain-middleware.md)：开箱即用的 `AgentMiddleware`，把 ContextSeek 的检索、存储与 compact 接入 `create_agent()` 构建的 Agent —— 示例见下方。
 - [示例](examples/README.md)：常见工作流的完整示例脚本。
 - [AppWorld 评测](eval/appworld/README.md) / [τ-bench 评测](eval/taubench/README.md)：可选评测脚手架，有独立的依赖与配置要求。
+
+```python
+from langchain.agents import create_agent
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from contextseek.bridges.langchain import ContextSeekMiddleware
+
+model = ChatOpenAI(model="gpt-4o")
+agent = create_agent(
+    model=model,
+    tools=[...],
+    middleware=[ContextSeekMiddleware(model=model, embedder=OpenAIEmbeddings())],
+)
+```
 
 ## 工作原理
 

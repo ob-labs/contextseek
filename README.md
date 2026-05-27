@@ -47,8 +47,22 @@ Configure via `.env` (see [.env.example](.env.example)) or `ContextSeekSettings`
 - [Client API reference](docs/en/reference/api.md): full method signatures for `add`, `retrieve`, `expand`, `compact`, `dream`, `evidence_chain`, and more.
 - [Configuration reference](docs/en/getting-started/configuration.md): all environment variables and `ContextSeekSettings` fields.
 - [DataPlugs](docs/en/guides/integrations/dataplugs.md): how to ingest from RAG pipelines, memory stores, execution traces, and skill / tool registries.
+- [LangChain middleware](docs/en/guides/integrations/langchain-middleware.md) / [中文](docs/zh/guides/integrations/langchain-middleware.md): drop-in `AgentMiddleware` that wires ContextSeek retrieval, storage, and compaction into a `create_agent()` agent — example below.
 - [Examples](examples/README.md): annotated scripts for common workflows.
 - [AppWorld eval](eval/appworld/README.md) / [τ-bench eval](eval/taubench/README.md): optional evaluation harnesses with their own setup requirements.
+
+```python
+from langchain.agents import create_agent
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from contextseek.bridges.langchain import ContextSeekMiddleware
+
+model = ChatOpenAI(model="gpt-4o")
+agent = create_agent(
+    model=model,
+    tools=[...],
+    middleware=[ContextSeekMiddleware(model=model, embedder=OpenAIEmbeddings())],
+)
+```
 
 ## How it works
 

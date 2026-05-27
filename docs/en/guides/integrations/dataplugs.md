@@ -11,10 +11,10 @@ Built-in plugs (in `contextseek.plugs`):
 | Execution trace | `TracePlug` | `raw` → evolved | `retrieve()` |
 | Skill / tool definitions | `HermesSkillImporter`, `MCPToolImporter`, `OpenAIFunctionImporter` | `skill` | `skill_tools()` / `skill_context()` |
 
-| In scope | Out of scope |
-|----------|--------------|
-| RAG, memory, traces, skills (`contextseek.plugs`) | Agent framework bridges (`bridges/langchain`, `bridges/deepagents`) |
-| — | Per-turn chat adapters in the harness |
+| In scope | See instead |
+|----------|-------------|
+| RAG, memory, traces, skills (`contextseek.plugs`) | LangChain agent runtime: [LangChain middleware](langchain-middleware.md) |
+| — | Per-turn chat adapters: `ContextSeekMemory` / `ContextSeekRetriever` in `contextseek.bridges.langchain` |
 
 Skill importers are implemented in `plugs/skills/` and re-exported from `contextseek.plugs`. See [Skill import](#skill-import-plugsskills).
 
@@ -219,7 +219,7 @@ ctx.plug(HermesSkillImporter("~/.hermes/skills"), scope="acme/bot/skills")
 
 After import: **`skill_tools()`**, **`skill_context()`** ([MCP, HTTP & CLI](mcp-http-cli.md)). Skills can also come from evolution (`distill` → `stage=skill`).
 
-LangChain tool objects are not shipped as importers; register tools via OpenAI JSON or MCP export, or use **bridges** for runtime wiring.
+LangChain tool objects are not shipped as importers; register tools via OpenAI JSON or MCP export, or use the [LangChain middleware](langchain-middleware.md) for runtime wiring.
 
 ---
 

@@ -34,6 +34,7 @@
 | 文档 | 说明 |
 |------|------|
 | [DataPlug](guides/integrations/dataplugs.md) | RAG / 记忆 / 轨迹；技能导入 |
+| [LangChain Middleware](guides/integrations/langchain-middleware.md) | `create_agent()` Agent 的 sidecar `AgentMiddleware` |
 | [MCP / HTTP / CLI](guides/integrations/mcp-http-cli.md) | 命令、路由、MCP 工具全表 |
 
 ## 参考

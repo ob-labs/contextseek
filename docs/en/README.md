@@ -34,6 +34,7 @@ Usage-focused guides for integrating ContextSeek into agents and applications.
 | Doc | Description |
 |-----|-------------|
 | [DataPlugs](guides/integrations/dataplugs.md) | RAG / memory / trace plugs; skill import |
+| [LangChain middleware](guides/integrations/langchain-middleware.md) | Sidecar `AgentMiddleware` for `create_agent()` agents |
 | [MCP, HTTP & CLI](guides/integrations/mcp-http-cli.md) | Full command/route/tool reference |
 
 ## Reference

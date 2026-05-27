@@ -11,10 +11,10 @@
 | 执行轨迹 | `TracePlug` | `raw` → 演进 | `retrieve()` |
 | 技能 / 工具定义 | `HermesSkillImporter`、`MCPToolImporter`、`OpenAIFunctionImporter` | `skill` | `skill_tools()` / `skill_context()` |
 
-| 适用 | 不适用 |
-|------|--------|
-| RAG、记忆、轨迹、技能（`contextseek.plugs`） | Agent 框架 桥接（`bridges/langchain`、`bridges/deepagents`） |
-| — | Harness 内逐轮对话适配 |
+| 适用 | 另见 |
+|------|------|
+| RAG、记忆、轨迹、技能（`contextseek.plugs`） | LangChain Agent 运行时：[LangChain Middleware](langchain-middleware.md) |
+| — | 逐轮对话适配：`contextseek.bridges.langchain` 中的 `ContextSeekMemory` / `ContextSeekRetriever` |
 
 技能实现在 `plugs/skills/`，并从 `contextseek.plugs` 再导出。见 [技能导入](#技能导入-plugsskills)。
 
@@ -219,7 +219,7 @@ ctx.plug(HermesSkillImporter("~/.hermes/skills"), scope="acme/bot/skills")
 
 导入后用 **`skill_tools()`**、**`skill_context()`**（见 [MCP / HTTP / CLI](mcp-http-cli.md)）。也可由演进生成（`distill` → `stage=skill`）。
 
-不提供 LangChain `BaseTool` 专用 Importer；请导出为 OpenAI/MCP JSON，或用 **bridges** 做运行时对接。
+不提供 LangChain `BaseTool` 专用 Importer；请导出为 OpenAI/MCP JSON，或用 [LangChain Middleware](langchain-middleware.md) 做运行时对接。
 
 ---
 
