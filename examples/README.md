@@ -11,6 +11,7 @@
 | `pipeline_file.py` | FileBackend（无需外部服务） | 本地文件后端，关键词检索 |
 | `pipeline_ob.py` | OceanBase | 向量 + 全文混合检索 |
 | `langchain.py` | FileBackend | LangChain Memory / Retriever 桥接 |
+| `langchain_deepagents_example.py` | FileBackend（无需外部服务） | LangChain + DeepAgents + ContextSeek 的真实集成示例 |
 
 ```bash
 uv run python examples/basic/pipeline_file.py  # 零外部依赖，推荐首选

@@ -36,11 +36,17 @@ make taubench-bench-oceanbase
 make taubench-bench-all
 ```
 
-The Makefile uses an isolated `.venv-taubench` environment via `UV_PROJECT_ENVIRONMENT`, then installs tau2 from `/tmp/tau2-bench` into that environment. tau-bench dependencies do not overwrite the AppWorld evaluation environment. To recreate it from scratch:
+The Makefile uses an isolated `.venv-taubench` environment via `UV_PROJECT_ENVIRONMENT`, then installs tau2 from a local checkout at `.tau2-bench`. If that checkout does not exist, `make taubench-install` clones `https://github.com/sierra-research/tau2-bench.git` automatically. tau-bench dependencies do not overwrite the AppWorld evaluation environment. To recreate everything from scratch:
 
 ```bash
 make taubench-clean-env
 make taubench-install
+```
+
+To use an existing checkout instead of the default path:
+
+```bash
+make taubench-install TAUBENCH_SOURCE=/path/to/tau2-bench
 ```
 
 If dependency downloads are slow, override the uv HTTP timeout:
@@ -112,7 +118,7 @@ The Makefile targets above expand to these direct commands:
 If you choose not to use the isolated Makefile environment, install tau2 in your active environment first:
 
 ```bash
-uv pip install -e /tmp/tau2-bench
+uv pip install -e ./.tau2-bench
 python -m eval.taubench.run \
   --config eval/taubench/config/baseline.yaml \
   --stage run,evaluate

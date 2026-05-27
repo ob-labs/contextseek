@@ -59,3 +59,17 @@ pip install "contextseek[langchain]"
 - `ContextSeekMemory` — 聊天历史持久化
 - `ContextSeekRetriever` — 上下文检索
 - LangChain adapter 用法（非 DataPlug 模式）
+
+---
+
+## langchain_deepagents_example.py — LangChain + DeepAgents 集成示例
+
+```bash
+uv run python examples/basic/langchain_deepagents_example.py
+```
+
+演示：
+- LangChain `create_agent` 基线（无 ContextSeek middleware）
+- DeepAgents `ContextStore` + `TraceSink` 预热写入 lesson
+- LangChain + `ContextSeekMiddleware` 检索增强后 fail -> pass
+- 单文件完成「写入 -> 检索 -> 复用」全链路展示

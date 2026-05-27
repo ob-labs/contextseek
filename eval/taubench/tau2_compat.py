@@ -29,6 +29,22 @@ def setup_tau2_data_dir():
     import os
     from pathlib import Path
 
-    data_dir = Path("/tmp/tau2-bench/data")
-    if data_dir.exists():
-        os.environ.setdefault("TAU2_DATA_DIR", str(data_dir))
+    candidates = []
+
+    configured = os.environ.get("TAU2_DATA_DIR")
+    if configured:
+        candidates.append(Path(configured))
+
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates.extend(
+        [
+            repo_root / ".tau2-bench" / "data",
+            Path("/tmp/tau2-bench/data"),
+            Path("/tmp/tau-bench/data"),
+        ]
+    )
+
+    for data_dir in candidates:
+        if data_dir.exists():
+            os.environ.setdefault("TAU2_DATA_DIR", str(data_dir))
+            return
