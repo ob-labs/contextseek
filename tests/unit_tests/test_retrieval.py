@@ -6,6 +6,7 @@ from contextseek.retrieval.components import (
     tokens,
 )
 from contextseek.config.strategies import RetrievalStrategy
+from contextseek.retrieval.orchestrator import _normalize_output_scores
 
 
 class TestTokens:
@@ -43,3 +44,13 @@ class TestHeuristicReranker:
         result = reranker.rerank(candidates, query="test", strategy=RetrievalStrategy())
         scores = [float(r["_score"]) for r in result]
         assert scores == sorted(scores, reverse=True)
+
+
+class TestOutputScoreNormalization:
+    def test_normalize_scores_uses_min_max(self):
+        scores = _normalize_output_scores([0.2, 0.6, 1.0])
+        assert scores == [0.0, 0.5, 1.0]
+
+    def test_normalize_scores_handles_degenerate_cases(self):
+        assert _normalize_output_scores([1.15, 1.15]) == [1.0, 1.0]
+        assert _normalize_output_scores([0.0, 0.0]) == [0.0, 0.0]

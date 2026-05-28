@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from time import perf_counter
 from typing import Any, Callable
 
@@ -169,10 +170,16 @@ class RetrievalOrchestrator:
             list(merged.values()), query=query, strategy=strategy, geo_query=geo_query
         )
         limited = reranked[:k]
+        normalized_scores = _normalize_output_scores(
+            [
+                float(payload.get("_score", payload.get("score", 0.0)))
+                for payload in limited
+            ]
+        )
 
         # ─── Convert to SearchHit ─────────────────────────────────
         hits: list[SearchHit] = []
-        for payload in limited:
+        for payload, normalized_score in zip(limited, normalized_scores):
             context_item = deserialize_context_item(payload)
             layer = "summary" if context_item.summary else "full"
             stage_confidence = STAGE_CONFIDENCE.get(context_item.stage, 0.3)
@@ -182,7 +189,7 @@ class RetrievalOrchestrator:
             hits.append(
                 SearchHit(
                     item=context_item,
-                    score=float(payload.get("_score", payload.get("score", 0.0))),
+                    score=normalized_score,
                     layer=layer,
                     provenance_summary=provenance_summary,
                     stage_confidence=stage_confidence,
@@ -222,3 +229,17 @@ def _build_provenance_summary(item: ContextItem) -> str:
     if prov.verified:
         parts.append("verified")
     return "; ".join(parts)
+
+
+def _normalize_output_scores(scores: list[float]) -> list[float]:
+    """Normalize final API scores into [0, 1] while preserving order."""
+    if not scores:
+        return []
+    sanitized = [score if math.isfinite(score) else 0.0 for score in scores]
+    min_score = min(sanitized)
+    max_score = max(sanitized)
+    span = max_score - min_score
+    if span <= 1e-12:
+        fill = 1.0 if max_score > 0.0 else 0.0
+        return [fill] * len(sanitized)
+    return [round((score - min_score) / span, 6) for score in sanitized]

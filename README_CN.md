@@ -34,7 +34,8 @@ ctx.add(
 
 # 检索（排名 SearchHit；默认返回 L1 摘要）
 for hit in ctx.retrieve("分布式数据库", scope="acme/db/engineer", k=10):
-    print(f"[{hit.item.stage.value}] score={hit.score:.2f} | {hit.item.summary[:60]}")
+    text = hit.item.summary or hit.item.content
+    print(f"[{hit.item.stage.value}] score={hit.score:.2f} | {text[:100]}")
 ```
 
 通过 `.env` 配置（参见 [.env.example](.env.example)）或在代码中构造 `ContextSeekSettings`。存储后端、Embedding 提供方和 LLM 是三个必要配置项。

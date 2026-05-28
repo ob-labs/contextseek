@@ -30,7 +30,7 @@ help:
 	@echo "  make check    # lint + format check (no writes)"
 	@echo ""
 	@echo "Build:"
-	@echo "  make build   # Build wheel"
+	@echo "  make build   # Build wheel + sdist"
 	@echo "  make clean   # Remove build artifacts and caches"
 	@echo ""
 	@echo "Demo:"
@@ -82,8 +82,8 @@ check:
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
-build:
-	$(UV) build
+build: clean
+	$(UV) run --with build --with hatchling python -m build --sdist --wheel --no-isolation
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +

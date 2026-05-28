@@ -36,7 +36,8 @@ ctx.add(
 
 # Retrieve (ranked SearchHits; L1 summaries by default)
 for hit in ctx.retrieve("distributed database", scope="acme/db/engineer", k=10):
-    print(f"[{hit.item.stage.value}] score={hit.score:.2f} | {hit.item.summary[:60]}")
+    text = hit.item.summary or hit.item.content
+    print(f"[{hit.item.stage.value}] score={hit.score:.2f} | {text[:100]}")
 ```
 
 Configure via `.env` (see [.env.example](.env.example)) or `ContextSeekSettings` in code. A storage backend, an embedding provider, and an LLM are the three required pieces.
