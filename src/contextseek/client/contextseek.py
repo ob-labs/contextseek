@@ -449,14 +449,57 @@ class ContextSeek:
             links=links or [],
         )
 
+        # Step 1 (early): generate L0 abstract + L1 summary so the embedder has
+        # a tight surface to work with. Step 2 (early): embed the abstract /
+        # content. Both run before conflict detection so we can use the
+        # embedding to ANN-narrow the candidate set instead of full-scanning.
+        if self.summarizer is not None:
+            item.abstract = self.summarizer.abstract(item.content_text)
+            item.summary = self.summarizer.summary(item.content_text)
+
+        if self.embedder is not None:
+            embed_source = item.abstract or item.content_text
+            item.embedding = self.embedder(embed_source)
+
         # Write-time conflict detection
         if check_conflicts:
             from contextseek.domain.conflicts import ConflictType, detect_conflicts
 
-            existing = [it for _, it in self._list_items(scope)]
+            # Fast-path: exact-duplicate via backend hash index.
+            # Match the legacy detect_conflicts behaviour, which skips items
+            # whose ``is_deleted`` is True — re-adding the same content into a
+            # scope where the prior copy was soft-deleted must succeed.
+            existing_ref = None
+            find_by_hash = getattr(self.adapter, "find_by_hash", None)
+            if find_by_hash is not None:
+                try:
+                    existing_ref = find_by_hash(
+                        self.resolver.prefix_for(scope), item.hash
+                    )
+                except Exception:  # noqa: BLE001  # backend errors must not block writes
+                    existing_ref = None
+            if existing_ref:
+                existing_item = self._read_item(existing_ref)
+                if existing_item is not None and not existing_item.is_deleted:
+                    # Policy: exact duplicate → return the existing item
+                    # idempotently instead of failing the call.  The write is
+                    # skipped; no new row is created.  Callers can detect the
+                    # dedup by comparing the returned item.id with the id they
+                    # would have expected for a fresh write.
+                    return existing_item
+                # Soft-deleted (or unreadable) → fall through to candidate-based
+                # detection so a revival writes a fresh row instead of failing.
+
+            # Narrow candidate set for near-duplicate / contradiction checks.
+            # When an embedding is available, use ANN recall (top-K) instead of
+            # listing the entire scope; falls back to a full scan only when the
+            # adapter cannot search by embedding.
+            candidates: list[ContextItem] = self._candidates_for_conflict_check(
+                item, scope
+            )
             result = detect_conflicts(
                 item,
-                existing,
+                candidates,
                 llm_judge=(
                     self._llm_conflict_judge
                     if self._llm_conflict_check_enabled and self.llm is not None
@@ -470,8 +513,16 @@ class ContextSeek:
                     for c in result.conflicts
                     if c.conflict_type == ConflictType.duplicate
                 )
-                msg = f"exact duplicate exists: {dup.existing_item_id}"
-                raise ValueError(msg)
+                # Policy: exact duplicate → return the existing item
+                # idempotently.  Prefer the structured conflict result over
+                # the hard-coded ValueError so callers and policies can
+                # inspect the result rather than being forced to catch.
+                dup_ref = self.resolver.ref_for(scope, dup.existing_item_id)
+                dup_item = self._read_item(dup_ref)
+                if dup_item is not None:
+                    return dup_item
+                # Existing item unreadable (race / corruption) — fall through
+                # and write the new item so the content is not silently lost.
 
             # Tag near-duplicates and contradictions for visibility
             if result.has_conflicts:
@@ -495,16 +546,6 @@ class ContextSeek:
                                 strength=c.similarity,
                             )
                         )
-
-        # Step 1: generate L0 abstract + L1 summary when a Summarizer is configured.
-        if self.summarizer is not None:
-            item.abstract = self.summarizer.abstract(item.content_text)
-            item.summary = self.summarizer.summary(item.content_text)
-
-        # Step 2: embed the L0 abstract; fall back to full L2 text when abstract is missing.
-        if self.embedder is not None:
-            source = item.abstract or item.content_text
-            item.embedding = self.embedder(source)
 
         # Serialize and persist
         payload = serialize_context_item(item)
@@ -2015,6 +2056,48 @@ class ContextSeek:
         ref = self.resolver.ref_for(item.scope, item.id)
         self.adapter.write(ref, payload)
         return ref
+
+    def _candidates_for_conflict_check(
+        self,
+        new_item: ContextItem,
+        scope: str,
+        *,
+        k: int = 20,
+    ) -> list[ContextItem]:
+        """Return a small candidate set for write-time near-dup / contradiction checks.
+
+        Selection rule (deliberate, not "ANN with text fallback"):
+
+        - **Embedder configured** → ANN top-K only. The candidates returned
+          here feed Jaccard / negation / LLM judge downstream; if the backend
+          silently degrades to FTS (e.g. ``InMemoryBackend.search`` discards
+          ``query_embedding``), those FTS hits are *not* a meaningful
+          near-duplicate candidate set, so we'd rather return an empty list
+          than mix in unrelated text matches. An empty candidate list simply
+          means no near-dup check fires for this write — better than a false
+          negative or a false positive from confusing the two retrieval modes.
+        - **No embedder** → full-scope scan via ``_list_items``. This keeps
+          the legacy Jaccard pipeline working for local / embedder-less
+          deployments.
+        """
+        if self.embedder is not None:
+            try:
+                payloads = self.adapter.search(
+                    self.resolver.prefix_for(scope),
+                    new_item.content_text[:200],
+                    k=k,
+                    query_embedding=new_item.embedding,
+                )
+            except Exception:  # noqa: BLE001
+                payloads = []
+            results: list[ContextItem] = []
+            for payload in payloads:
+                try:
+                    results.append(deserialize_context_item(payload))
+                except (KeyError, TypeError, ValueError):
+                    continue
+            return results
+        return [it for _, it in self._list_items(scope)]
 
     def _list_items(
         self,

@@ -100,9 +100,16 @@ class RetrievalOrchestrator:
         recall_paths: set[str] = set()
         recall_limit = max(k, 1) * max(strategy.candidate_multiplier, 1)
 
+        # Each emitted recall is tagged with both the route name and the
+        # prefix it ran against. RRF needs one rank stream per (route, prefix)
+        # pair so that scope-local backend rankings stay comparable.
+        ranked_streams: list[tuple[str, list[dict[str, object]]]] = []
+
         for prefix in prefixes:
             for recall_query in recall_route.build_queries(query, strategy):
                 recall_paths.add(recall_query.route_name)
+                stream_id = f"{recall_query.route_name}@{prefix}"
+                stream_hits: list[dict[str, object]] = []
                 for item in recall_route.recall(
                     self.adapter,
                     prefix=prefix,
@@ -112,6 +119,8 @@ class RetrievalOrchestrator:
                     routed = dict(item)
                     routed["_recall_path"] = recall_query.route_name
                     raw_hits.append(routed)
+                    stream_hits.append(routed)
+                ranked_streams.append((stream_id, stream_hits))
 
         # ─── Geo recall (optional, runs alongside other routes) ────
         if geo_query is not None:
@@ -121,6 +130,8 @@ class RetrievalOrchestrator:
                     query, strategy, geo_query=geo_query
                 ):
                     recall_paths.add(geo_rq.route_name)
+                    stream_id = f"{geo_rq.route_name}@{prefix}"
+                    stream_hits = []
                     for item in geo_route.recall(
                         self.adapter,
                         prefix=prefix,
@@ -130,40 +141,80 @@ class RetrievalOrchestrator:
                         routed = dict(item)
                         routed["_recall_path"] = geo_rq.route_name
                         raw_hits.append(routed)
+                        stream_hits.append(routed)
+                    ranked_streams.append((stream_id, stream_hits))
 
         # ─── Filter: deleted, stage, tags ─────────────────────────
-        if not include_deleted:
-            raw_hits = [h for h in raw_hits if not h.get("deleted_at")]
+        # Filtering happens before RRF so excluded items don't consume rank
+        # slots in the fusion. We filter the per-stream lists in place.
+        def _keep(h: dict[str, object]) -> bool:
+            if not include_deleted and h.get("deleted_at"):
+                return False
+            if stage is not None and h.get("stage") != stage.value:
+                return False
+            if tags:
+                if not set(tags).issubset(set(h.get("tags") or [])):
+                    return False
+            return True
 
-        if stage is not None:
-            raw_hits = [h for h in raw_hits if h.get("stage") == stage.value]
-
-        if tags:
-            tag_set = set(tags)
-            raw_hits = [
-                h for h in raw_hits if tag_set.issubset(set(h.get("tags") or []))
-            ]
+        ranked_streams = [
+            (sid, [h for h in s if _keep(h)]) for sid, s in ranked_streams
+        ]
+        raw_hits = [h for h in raw_hits if _keep(h)]
 
         recall_elapsed_ms = (perf_counter() - recall_start) * 1000.0
 
-        # ─── Dedupe by item hash ──────────────────────────────────
+        # ─── RRF fusion across streams ────────────────────────────
+        # For each item, sum 1 / (rrf_k + rank) across every stream that
+        # returned it. This rewards multi-stream consensus and is invariant to
+        # the (often heterogeneous) raw score scales returned by different
+        # backends or routes.
         rerank_start = perf_counter()
+        rrf_k = max(1, int(getattr(strategy, "rrf_k", 60)))
         merged: dict[str, dict[str, object]] = {}
-        for item in raw_hits:
-            dedupe_key = str(item.get("hash") or item.get("id") or item.get("ref", ""))
-            existing = merged.get(dedupe_key)
-            if existing is None:
-                item["_recall_paths"] = [str(item.get("_recall_path", ""))]
-                merged[dedupe_key] = item
-                continue
-            # Merge recall paths
-            paths = set(existing.get("_recall_paths", []))
-            paths.add(str(item.get("_recall_path", "")))
-            existing["_recall_paths"] = sorted(p for p in paths if p)
-            # Keep the higher-scoring variant
-            if float(item.get("score", 0.0)) > float(existing.get("score", 0.0)):
-                item["_recall_paths"] = existing["_recall_paths"]
-                merged[dedupe_key] = item
+        for stream_id, stream_hits in ranked_streams:
+            for rank, item in enumerate(stream_hits, start=1):
+                key = str(item.get("id") or item.get("ref", ""))
+                if not key:
+                    continue
+                contribution = 1.0 / (rrf_k + rank)
+                existing = merged.get(key)
+                if existing is None:
+                    fused = dict(item)
+                    fused["_recall_paths"] = [str(item.get("_recall_path", ""))]
+                    fused["_rrf"] = contribution
+                    # Preserve the highest backend score for debugging /
+                    # downstream score features even though _rrf is what
+                    # actually drives ranking from here on.
+                    fused["_backend_score"] = float(item.get("score", 0.0))
+                    merged[key] = fused
+                    continue
+                paths = set(existing.get("_recall_paths", []))
+                paths.add(str(item.get("_recall_path", "")))
+                existing["_recall_paths"] = sorted(p for p in paths if p)
+                existing["_rrf"] = float(existing.get("_rrf", 0.0)) + contribution
+                existing["_backend_score"] = max(
+                    float(existing.get("_backend_score", 0.0)),
+                    float(item.get("score", 0.0)),
+                )
+
+        # Hand the fused score off to the reranker via the conventional
+        # ``score`` field so downstream rerankers (Heuristic / LLM / Relation)
+        # don't need to know about RRF.
+        #
+        # Batch-level max normalization: raw RRF accumulates 1/(k+rank) per
+        # stream, so absolute values stay in 0.01–0.07 even for top-1 multi-
+        # route hits. Without normalization, the recall channel feeds tiny
+        # numbers into the reranker's weighted-average (recall ∈ [0.01, 0.07]
+        # vs overlap/feedback ∈ [0, 1]), letting overlap/feedback dominate and
+        # the multi-route consensus signal evaporate.
+        if merged:
+            max_rrf = max(float(it.get("_rrf", 0.0)) for it in merged.values())
+            if max_rrf <= 0.0:
+                max_rrf = 1.0
+            for item in merged.values():
+                item["score"] = float(item.get("_rrf", 0.0)) / max_rrf
+        # Empty merged → loop body below is a no-op; nothing to normalize.
 
         # ─── Rerank ───────────────────────────────────────────────
         reranked = reranker.rerank(

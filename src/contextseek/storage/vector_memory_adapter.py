@@ -10,6 +10,7 @@ import json
 import math
 from typing import Any
 
+from contextseek.storage.protocol import HashIndexMixin
 from contextseek.storage.protocol import VectorSearchMixin
 
 
@@ -23,7 +24,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return max(0.0, min(1.0, dot / (norm_a * norm_b)))
 
 
-class VectorMemoryAdapter(VectorSearchMixin):
+class VectorMemoryAdapter(HashIndexMixin, VectorSearchMixin):
     """Flat in-memory adapter supporting both text and vector search.
 
     Payloads are stored as plain dicts.  Text search uses simple substring
@@ -106,6 +107,16 @@ class VectorMemoryAdapter(VectorSearchMixin):
         self._store.pop(ref, None)
         self._vectors.pop(ref, None)
         return existed
+
+    def find_by_hash(self, prefix: str, hash_value: str) -> str | None:
+        if not hash_value:
+            return None
+        for ref, payload in self._store.items():
+            if not ref.startswith(prefix):
+                continue
+            if str(payload.get("hash") or "") == hash_value:
+                return ref
+        return None
 
     # ------------------------------------------------------------------
     # VectorSearchMixin override

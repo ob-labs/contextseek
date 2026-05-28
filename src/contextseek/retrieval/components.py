@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from typing import Protocol
+import math
 import re
 
 from contextseek.storage.protocol import SeekVFSAdapter
@@ -201,48 +202,108 @@ class HeuristicReranker:
         strategy: RetrievalStrategy,
         geo_query: Any | None = None,
     ) -> float:
-        base = float(item.get("score", 0.0))
+        """Combine recall score, query-overlap, evidence and feedback into a
+        normalized [0, 1] base, then apply multiplicative penalties and the
+        importance multiplier.
+
+        Each feature is independently clamped to [0, 1] and combined as a
+        weighted sum whose weights renormalize so the base never exceeds 1.0.
+        This avoids the prior behaviour where additive bonuses pushed the score
+        past 1.0 and were silently clipped, making feedback / overlap weights
+        practically inert.
+        """
+        # ─── Normalize each feature to [0, 1] ─────────────────────
+        recall = max(0.0, min(1.0, float(item.get("score", 0.0))))
+
         query_tokens = set(tokens(query))
-        content_tokens = set(tokens(_content_for_score(item)))
         if query_tokens:
+            content_tokens = set(tokens(_content_for_score(item)))
             overlap = len(query_tokens & content_tokens) / len(query_tokens)
-            base += overlap * strategy.term_weight
-        if item.get("evidence_id"):
-            base += strategy.evidence_weight
+        else:
+            overlap = 0.0
+
         try:
             feedback_score = float(item.get("feedback_score", 0.0))
         except (TypeError, ValueError):
             feedback_score = 0.0
-        base += feedback_score * strategy.feedback_weight
-        # Phase 3: boost by evidence quality score
+        # Exclude the feedback channel when there is no interaction signal.
+        # sigmoid(0) = 0.5 would apply a uniform positive bias to every item
+        # that has never been interacted with; zeroing the weight removes the
+        # channel entirely so recall / overlap carry the full weight instead.
+        if feedback_score != 0.0:
+            feedback = 1.0 / (1.0 + math.exp(-feedback_score))
+            feedback_weight = max(0.0, float(strategy.feedback_weight))
+        else:
+            feedback = 0.0
+            feedback_weight = 0.0
+
         try:
             quality_score = float(item.get("quality_score") or 0.0)
         except (TypeError, ValueError):
             quality_score = 0.0
-        if quality_score > 0.0:
-            base += quality_score * strategy.evidence_quality_weight
-        # Phase 3: penalise items flagged as conflicting
+        quality = max(0.0, min(1.0, quality_score))
+
+        evidence = 1.0 if item.get("evidence_id") else 0.0
+
+        # ─── Weighted linear combination (renormalized so weights sum to 1) ─
+        # Weights are taken from RetrievalStrategy. Their sum normally already
+        # leaves the recall feature with the dominant share; if a config zeroes
+        # out everything we fall back to recall only.
+        recall_weight = 1.0  # implicit weight of the recall channel
+        weights = {
+            "recall": recall_weight,
+            "overlap": max(0.0, float(strategy.term_weight)),
+            "feedback": feedback_weight,
+            "quality": max(0.0, float(strategy.evidence_quality_weight)),
+            "evidence": max(0.0, float(strategy.evidence_weight)),
+        }
+        total_weight = sum(weights.values())
+        if total_weight <= 0:
+            base = recall
+        else:
+            base = (
+                weights["recall"] * recall
+                + weights["overlap"] * overlap
+                + weights["feedback"] * feedback
+                + weights["quality"] * quality
+                + weights["evidence"] * evidence
+            ) / total_weight
+
+        # ─── Multiplicative penalties ─────────────────────────────
         conflict_with = item.get("conflict_with")
         if isinstance(conflict_with, list) and conflict_with:
             base *= max(0.0, 1.0 - strategy.conflict_penalty)
+
         tier = str(item.get("tier", "")).lower()
         if item.get("is_archived") or tier == "cold":
             base *= max(0.0, 1.0 - strategy.archive_penalty)
         elif tier == "warm":
             base *= max(0.0, 1.0 - strategy.archive_penalty / 2)
-        # Geo spatial decay: penalise items far from query center
+
         if geo_query is not None and getattr(geo_query, "center", None) is not None:
             content = item.get("content", {})
             item_geo = content.get("geo") if isinstance(content, dict) else None
             base *= geo_decay_score(
                 item_geo, geo_query.center, decay_km=strategy.distance_decay_km
             )
-        # Cap at 1.0 before applying importance, so that term_weight boosts
-        # cannot offset the importance penalty.
-        base = min(base, 1.0)
-        # Importance multiplier applied last: ensures a low-importance item
-        # never scores higher than a high-importance item of equal relevance,
-        # even after all additive bonuses (term_weight, feedback, etc.).
+
+        # ─── Stage maturity multiplier ────────────────────────────
+        # Promotes evolved knowledge / skill items above raw traces at equal
+        # recall scores. Falls back to STAGE_CONFIDENCE when stage_weights is
+        # not explicitly configured so behaviour stays sensible by default.
+        # Missing or unrecognised stage values are treated as Stage.raw (×0.3)
+        # so they rank below extracted/knowledge/skill rather than behaving as
+        # if no multiplier applies (which was effectively ×1.0, above raw).
+        from contextseek.domain.stages import Stage as _Stage
+
+        stage_value = str(item.get("stage") or "").lower() or _Stage.raw.value
+        stage_weight = _resolve_stage_weight(strategy, stage_value)
+        if stage_weight is None:
+            stage_weight = _resolve_stage_weight(strategy, _Stage.raw.value)
+        if stage_weight is not None:
+            base *= stage_weight
+
+        # ─── Importance multiplier (applied last) ─────────────────
         if strategy.importance_alpha > 0.0:
             try:
                 importance = float(item.get("importance") or 1.0)
@@ -250,6 +311,7 @@ class HeuristicReranker:
                 importance = 1.0
             importance = max(importance, strategy.importance_floor)
             base *= importance**strategy.importance_alpha
+
         return round(base, 6)
 
 
@@ -369,6 +431,34 @@ def _content_for_score(item: dict[str, object]) -> str:
         str(item.get("tags", "")),
     ]
     return " ".join(parts).lower()
+
+
+def _resolve_stage_weight(
+    strategy: RetrievalStrategy, stage_value: str
+) -> float | None:
+    """Look up the multiplier for ``stage_value`` from strategy configuration.
+
+    Order of precedence:
+      1. ``RetrievalStrategy.stage_weights`` (explicit per-deployment config)
+      2. ``STAGE_CONFIDENCE`` from the domain layer (sensible default)
+      3. None (no multiplier — keeps backwards-compat for unknown stages)
+    """
+    weights = getattr(strategy, "stage_weights", None)
+    if weights:
+        for stage_name, weight in weights:
+            if stage_name == stage_value:
+                try:
+                    return float(weight)
+                except (TypeError, ValueError):
+                    return None
+    # Fallback to STAGE_CONFIDENCE.
+    from contextseek.domain.stages import STAGE_CONFIDENCE, Stage
+
+    try:
+        stage_enum = Stage(stage_value)
+    except ValueError:
+        return None
+    return STAGE_CONFIDENCE.get(stage_enum)
 
 
 class GeoRecallRoute:

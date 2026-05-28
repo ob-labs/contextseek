@@ -40,6 +40,23 @@ class SeekVFSAdapter(Protocol):
         """Delete payload by URI."""
 
 
+class HashIndexMixin:
+    """Mixin that adds find_by_hash to adapters that maintain a hash → ref index.
+
+    This is an optional fast-path for write-time exact-duplicate detection.
+    Adapters that cannot answer hash lookups efficiently should NOT inherit
+    from this mixin; callers access the method via ``getattr`` so the absence
+    is handled gracefully.
+    """
+
+    def find_by_hash(self, prefix: str, hash_value: str) -> str | None:
+        """Return the ref of an item under *prefix* whose ``payload['hash']`` matches.
+
+        Returns ``None`` when no match exists or the index is unavailable.
+        """
+        return None
+
+
 class GeoSearchMixin:
     """Mixin that adds geo_search / is_point_within_zone to adapters backed by OceanBaseGeoBackend.
 

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from contextseek.storage.protocol import HashIndexMixin
 from contextseek.storage.protocol import SeekVFSAdapter
 
 
-class TieredSeekVFSAdapter(SeekVFSAdapter):
+class TieredSeekVFSAdapter(HashIndexMixin, SeekVFSAdapter):
     """Route cold payloads to a separate backend with hot stubs."""
 
     def __init__(
@@ -92,6 +93,19 @@ class TieredSeekVFSAdapter(SeekVFSAdapter):
         removed = self._hot.delete(ref)
         removed = self._cold.delete(ref) or removed
         return removed
+
+    def find_by_hash(self, prefix: str, hash_value: str) -> str | None:
+        for adapter in (self._hot, self._cold):
+            fn = getattr(adapter, "find_by_hash", None)
+            if fn is None:
+                continue
+            try:
+                ref = fn(prefix, hash_value)
+            except Exception:  # noqa: BLE001
+                ref = None
+            if ref:
+                return ref
+        return None
 
     def promote(self, ref: str, payload: dict[str, Any]) -> None:
         payload = dict(payload)
