@@ -51,6 +51,10 @@ class RetrievalStrategy:
     reranker_mode: str = "heuristic"
     # Limit number of candidates scored by LLM in reranking
     llm_rerank_top_n: int = 20
+    # Reciprocal Rank Fusion constant used when merging multi-route hits at the
+    # orchestrator layer. Industry convention is k=60; smaller values amplify
+    # rank differences, larger values smooth them out.
+    rrf_k: int = 60
 
 
 HYBRID_RETRIEVAL_STRATEGY = RetrievalStrategy(

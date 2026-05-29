@@ -923,6 +923,37 @@ class OceanBaseBackend(BackendProtocol):
         if result.rowcount == 0:
             raise NotFoundError(path)
 
+    def find_by_hash(self, path_pattern: str | None, hash_value: str) -> str | None:
+        """Return the ref of an item whose ``payload_json.hash`` equals *hash_value*.
+
+        Reads from ``payload_json`` via ``JSON_EXTRACT`` because ``hash`` is not
+        hoisted to a dedicated column. For scopes with a small candidate set
+        this is fast even without a dedicated index; for very large scopes a
+        functional index on ``JSON_EXTRACT(payload_json, '$.hash')`` can be
+        added externally.
+        """
+        if not hash_value:
+            return None
+        assert self._obvector is not None and self._table is not None
+        prefix = _prefix_from_pattern(path_pattern)
+        table = self._table
+        hash_expr = text(
+            "JSON_UNQUOTE(JSON_EXTRACT(payload_json, '$.hash')) = :h"
+        ).bindparams(bindparam("h", hash_value))
+        stmt = select(table.c["ref"]).where(hash_expr)
+        if prefix:
+            stmt = stmt.where(table.c["namespace"].like(f"{prefix}%"))
+        stmt = stmt.limit(1)
+        try:
+            with self._obvector.engine.connect() as conn:
+                row = conn.execute(stmt).fetchone()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"find_by_hash failed: {exc}")
+            return None
+        if row is None:
+            return None
+        return str(row[0])
+
     def close(self) -> None:
         """Dispose the underlying SQLAlchemy engine connection pool.
 

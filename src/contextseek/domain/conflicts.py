@@ -59,6 +59,7 @@ def detect_conflicts(
     llm_judge: Callable[[str, str, float], ConflictType | None] | None = None,
     llm_min_similarity: float = 0.5,
     llm_max_similarity: float = 0.95,
+    llm_budget: int = 3,
 ) -> ConflictCheckResult:
     """Detect conflicts between a new item and existing items in scope.
 
@@ -69,17 +70,30 @@ def detect_conflicts(
 
     Args:
         new_item: The item being written.
-        existing_items: Current items in the same scope.
+        existing_items: Current items in the same scope (or an ANN-narrowed
+            candidate set).
         near_duplicate_threshold: Token overlap above which items are
             considered near-duplicates (0.0–1.0).
+        llm_judge: Optional callable that disambiguates near-dup vs contradiction
+            for medium-similarity pairs.
+        llm_min_similarity / llm_max_similarity: LLM judge is only invoked when
+            token overlap falls inside this band.
+        llm_budget: Maximum number of LLM judge calls per ``detect_conflicts``
+            invocation. Caps the worst-case latency / cost when many candidates
+            land in the medium-similarity band.
 
     Returns:
         ConflictCheckResult with detected conflicts.
     """
     conflicts: list[WriteConflict] = []
+    remaining_llm_budget = max(0, int(llm_budget))
 
     new_text = new_item.content_text.lower()
     new_tokens = _tokenize(new_text)
+
+    # Collect LLM-band candidates for deferred sorted processing; hash-dups,
+    # near-dups, and negation-heuristic items are resolved inline on first pass.
+    band_candidates: list[tuple[float, ContextItem]] = []
 
     for existing in existing_items:
         if existing.is_deleted:
@@ -122,40 +136,15 @@ def detect_conflicts(
                 )
                 continue
 
-        # 2.5 Semantic conflict classification by optional LLM judge.
-        # Only run for medium/high-similarity pairs to cap cost.
+        # 2.5 Collect LLM-band candidates for deferred processing.
+        # They are sorted by overlap descending after the first pass so the
+        # budget is spent on the highest-similarity pairs first.
         if (
             llm_judge is not None
             and llm_min_similarity <= overlap <= llm_max_similarity
         ):
-            try:
-                judged = llm_judge(
-                    new_item.content_text, existing.content_text, overlap
-                )
-            except Exception:
-                judged = None
-            if judged == ConflictType.near_duplicate:
-                conflicts.append(
-                    WriteConflict(
-                        conflict_type=ConflictType.near_duplicate,
-                        existing_item_id=existing.id,
-                        existing_content_preview=_preview(existing.content_text),
-                        similarity=round(overlap, 4),
-                        suggestion="LLM judged as near-duplicate. Consider merging via compact().",
-                    )
-                )
-                continue
-            if judged == ConflictType.contradiction:
-                conflicts.append(
-                    WriteConflict(
-                        conflict_type=ConflictType.contradiction,
-                        existing_item_id=existing.id,
-                        existing_content_preview=_preview(existing.content_text),
-                        similarity=round(overlap, 4),
-                        suggestion="LLM judged as contradiction. Consider refuted_by or supersedes links.",
-                    )
-                )
-                continue
+            band_candidates.append((overlap, existing))
+            continue
 
         # 3. Contradiction detection (simple heuristic: negation patterns)
         if _appears_contradictory(new_text, existing_text):
@@ -170,6 +159,53 @@ def detect_conflicts(
                         "Potential contradiction detected. "
                         "Consider adding a refuted_by link or supersedes link."
                     ),
+                )
+            )
+
+    # 2.5 Process LLM-band candidates sorted by overlap descending.
+    # High-similarity pairs are processed first so the budget is consumed where
+    # it matters most; budget-exhausted remainders fall back to the negation
+    # heuristic rather than being silently dropped.
+    band_candidates.sort(key=lambda x: -x[0])
+    for overlap, existing in band_candidates:
+        if remaining_llm_budget <= 0:
+            if _appears_contradictory(new_text, existing.content_text.lower()):
+                conflicts.append(
+                    WriteConflict(
+                        conflict_type=ConflictType.contradiction,
+                        existing_item_id=existing.id,
+                        existing_content_preview=_preview(existing.content_text),
+                        similarity=round(overlap, 4),
+                        suggestion=(
+                            "Potential contradiction detected. "
+                            "Consider adding a refuted_by link or supersedes link."
+                        ),
+                    )
+                )
+            continue
+        remaining_llm_budget -= 1
+        try:
+            judged = llm_judge(new_item.content_text, existing.content_text, overlap)
+        except Exception:
+            judged = None
+        if judged == ConflictType.near_duplicate:
+            conflicts.append(
+                WriteConflict(
+                    conflict_type=ConflictType.near_duplicate,
+                    existing_item_id=existing.id,
+                    existing_content_preview=_preview(existing.content_text),
+                    similarity=round(overlap, 4),
+                    suggestion="LLM judged as near-duplicate. Consider merging via compact().",
+                )
+            )
+        elif judged == ConflictType.contradiction:
+            conflicts.append(
+                WriteConflict(
+                    conflict_type=ConflictType.contradiction,
+                    existing_item_id=existing.id,
+                    existing_content_preview=_preview(existing.content_text),
+                    similarity=round(overlap, 4),
+                    suggestion="LLM judged as contradiction. Consider refuted_by or supersedes links.",
                 )
             )
 

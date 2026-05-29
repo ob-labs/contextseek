@@ -10,6 +10,7 @@ from typing import Any
 from typing import TYPE_CHECKING
 
 from contextseek.storage.protocol import GeoSearchMixin
+from contextseek.storage.protocol import HashIndexMixin
 from contextseek.storage.protocol import SeekVFSAdapter
 from contextseek.storage.protocol import VectorSearchMixin
 from contextseek.domain.levels import ContentLevel
@@ -29,7 +30,9 @@ def _json_default(o: Any) -> Any:
     raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
 
 
-class SeekVFSStorageAdapter(GeoSearchMixin, VectorSearchMixin, SeekVFSAdapter):
+class SeekVFSStorageAdapter(
+    HashIndexMixin, GeoSearchMixin, VectorSearchMixin, SeekVFSAdapter
+):
     """Bridge `seekvfs.VFS` to contextseek's storage protocol.
 
     Translates contextseek's `contextseek://` refs to the VFS's own scheme
@@ -169,6 +172,35 @@ class SeekVFSStorageAdapter(GeoSearchMixin, VectorSearchMixin, SeekVFSAdapter):
         except NotFoundError:
             return False
         return True
+
+    def find_by_hash(self, prefix: str, hash_value: str) -> str | None:
+        """Delegate hash lookup to the underlying backend when available.
+
+        Returns ``None`` when the backend cannot answer cheaply, signalling
+        callers to fall back to a full scan or skip exact-duplicate detection.
+        """
+        if not hash_value:
+            return None
+        inner_prefix = self._to_inner(prefix)
+        path_pattern = f"{self._inner_scheme}{inner_prefix}*"
+        backend = self._resolve_backend(path_pattern)
+        if backend is None:
+            return None
+        backend_fn = getattr(backend, "find_by_hash", None)
+        if backend_fn is None:
+            return None
+        try:
+            inner_ref = backend_fn(path_pattern, hash_value)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "find_by_hash failed on backend %s: %s",
+                type(backend).__name__,
+                exc,
+            )
+            return None
+        if not inner_ref:
+            return None
+        return self._to_outer(str(inner_ref))
 
     def read_with_level(self, ref: str, level: ContentLevel) -> str | None:
         """Read the content field for the requested tier."""

@@ -8,6 +8,7 @@ that VFS was built with flows through unchanged.
 from __future__ import annotations
 
 import fnmatch
+import json
 from datetime import UTC
 from datetime import datetime
 
@@ -24,16 +25,49 @@ def _to_bytes(content: bytes | str) -> bytes:
     return content if isinstance(content, bytes) else content.encode("utf-8")
 
 
+def _extract_hash(raw: bytes) -> str | None:
+    """Best-effort read of payload['hash'] from a JSON-encoded record.
+
+    Returns ``None`` when the payload is not a JSON object or the hash field
+    is missing/empty — callers treat that as "no fast-path lookup possible".
+    """
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    try:
+        payload = json.loads(decoded)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("hash")
+    return str(value) if value else None
+
+
 class InMemoryBackend(BackendProtocol):
     """Flat in-memory K/V backend implementing `seekvfs.BackendProtocol`."""
 
     def __init__(self) -> None:
         self._data: dict[str, bytes] = {}
         self._mtime: dict[str, datetime] = {}
+        # hash → path; many paths may share a hash (e.g. cross-scope) so we
+        # keep the latest writer; callers must always re-verify with read().
+        self._hash_index: dict[str, str] = {}
 
     def write(self, path: str, content: bytes | str) -> None:
-        self._data[path] = _to_bytes(content)
+        raw = _to_bytes(content)
+        # When overwriting, drop the old hash mapping if it pointed here.
+        prev = self._data.get(path)
+        if prev is not None:
+            prev_hash = _extract_hash(prev)
+            if prev_hash and self._hash_index.get(prev_hash) == path:
+                self._hash_index.pop(prev_hash, None)
+        self._data[path] = raw
         self._mtime[path] = datetime.now(tz=UTC)
+        new_hash = _extract_hash(raw)
+        if new_hash:
+            self._hash_index[new_hash] = path
 
     def read(self, path: str, hint: str | None = None) -> FileData:
         if path not in self._data:
@@ -133,8 +167,26 @@ class InMemoryBackend(BackendProtocol):
     def delete(self, path: str) -> None:
         if path not in self._data:
             raise NotFoundError(path)
+        existing_hash = _extract_hash(self._data[path])
         del self._data[path]
         self._mtime.pop(path, None)
+        if existing_hash and self._hash_index.get(existing_hash) == path:
+            self._hash_index.pop(existing_hash, None)
+
+    def find_by_hash(self, path_pattern: str, hash_value: str) -> str | None:
+        """Return the path of an item whose payload hash matches *hash_value*.
+
+        ``path_pattern`` is the same fnmatch-style glob that ``search`` accepts,
+        used here to constrain the lookup to a prefix.
+        """
+        if not hash_value:
+            return None
+        path = self._hash_index.get(hash_value)
+        if path is None:
+            return None
+        if path_pattern is not None and not fnmatch.fnmatch(path, path_pattern):
+            return None
+        return path
 
     def initialize(self) -> None:
         pass
