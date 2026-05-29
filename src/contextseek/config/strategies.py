@@ -82,6 +82,11 @@ class EvolutionStrategy:
     reverification_threshold: float = 0.4
     # Enable LLM synthesis when merging extracted clusters
     llm_merge_enabled: bool = False
+    # LLM-free plain text evolution
+    text_extract_min_access: int = 3
+    heuristic_distill_min_use: int = 5
+    heuristic_distill_min_age_days: float = 3.0
+    heuristic_distill_min_boost: float = 1.1
 
 
 @dataclass(frozen=True)

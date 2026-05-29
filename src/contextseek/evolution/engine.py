@@ -13,7 +13,7 @@ from contextseek.domain.context_item import ContextItem
 from contextseek.domain.inference import _is_trace_structure
 from contextseek.domain.results import CompactReport
 from contextseek.domain.stages import Stage
-from contextseek.evolution.distiller import SkillDistiller
+from contextseek.evolution.distiller import HeuristicDistillRule, SkillDistiller
 from contextseek.evolution.extractor import Extractor, HeuristicExtractor
 from contextseek.evolution.merger import ConvergenceMerger
 from contextseek.evolution.rules import DEFAULT_RULES, EvolutionRule
@@ -66,6 +66,25 @@ class EvolutionEngine:
                 strategy, "distill_min_relevance_boost", distiller_min_boost
             )
 
+        text_extract_min_access = 3
+        heuristic_distill_min_use = 5
+        heuristic_distill_min_age_days = 3.0
+        heuristic_distill_min_boost = 1.1
+        if strategy is not None:
+            text_extract_min_access = getattr(
+                strategy, "text_extract_min_access", text_extract_min_access
+            )
+            heuristic_distill_min_use = getattr(
+                strategy, "heuristic_distill_min_use", heuristic_distill_min_use
+            )
+            heuristic_distill_min_age_days = getattr(
+                strategy, "heuristic_distill_min_age_days", heuristic_distill_min_age_days
+            )
+            heuristic_distill_min_boost = getattr(
+                strategy, "heuristic_distill_min_boost", heuristic_distill_min_boost
+            )
+
+        self._text_extract_min_access = text_extract_min_access
         self._ephemeral_ttl = ephemeral_ttl
         self._extractor = extractor or HeuristicExtractor()
         self._merger = merger or ConvergenceMerger(
@@ -74,11 +93,17 @@ class EvolutionEngine:
             half_life_days=merger_half_life,
             synthesize_fn=merge_synthesize_fn,
         )
+        default_heuristic_rule = HeuristicDistillRule(
+            min_access_count=heuristic_distill_min_use,
+            min_age_days=heuristic_distill_min_age_days,
+            min_relevance_boost=heuristic_distill_min_boost,
+        )
         self._distiller = distiller or SkillDistiller(
             min_use_count=distiller_min_use,
             min_relevance_boost=distiller_min_boost,
             llm_decide_fn=distill_decide_fn,
             llm_distill_fn=distill_render_fn,
+            heuristic_rule=default_heuristic_rule,
         )
 
     def evolve(
@@ -137,6 +162,25 @@ class EvolutionEngine:
             new_items.append(skill_item)
             report.evolved_count += 1
 
+        # Phase 3.5: Heuristic distillation for plain text items (no LLM required)
+        # Operates on all non-skill, non-archived items that are plain text.
+        # Skips items already promoted by Phase 3 above.
+        distilled_ids = {it.id for it in new_items if it.stage == Stage.skill}
+        all_items_for_heuristic = [
+            it
+            for it in items
+            if not it.is_deleted
+            and it.stage != Stage.skill
+            and it.id not in distilled_ids
+        ]
+        heuristic_candidates = self._distiller.identify_heuristic_candidates(
+            all_items_for_heuristic
+        )
+        for candidate in heuristic_candidates:
+            heuristic_skill = self._distiller.distill_heuristic(candidate)
+            new_items.append(heuristic_skill)
+            report.evolved_count += 1
+
         # Phase 4: Archive expired items (stability=ephemeral past TTL)
         for item in items:
             if not item.is_deleted and self._should_archive(item):
@@ -150,20 +194,22 @@ class EvolutionEngine:
 
     def _eligible_for_extraction(self, item: ContextItem) -> bool:
         """Check if a raw item is eligible for extraction."""
-        # Must have trace structure
-        if not isinstance(item.content, dict):
-            return False
-        if not _is_trace_structure(item.content):
-            return False
-        # Check minimum age (from extraction rule)
-        extraction_rule = next(
-            (r for r in self._rules if r.name == "extract_from_trace"), None
-        )
-        if extraction_rule and extraction_rule.min_age_seconds > 0:
-            age = (datetime.now(timezone.utc) - item.created_at).total_seconds()
-            if age < extraction_rule.min_age_seconds:
-                return False
-        return True
+        # Trace structure path: existing behavior unchanged
+        if isinstance(item.content, dict) and _is_trace_structure(item.content):
+            extraction_rule = next(
+                (r for r in self._rules if r.name == "extract_from_trace"), None
+            )
+            if extraction_rule and extraction_rule.min_age_seconds > 0:
+                age = (datetime.now(timezone.utc) - item.created_at).total_seconds()
+                if age < extraction_rule.min_age_seconds:
+                    return False
+            return True
+
+        # Plain text path: promote after sufficient access count
+        if isinstance(item.content, str) and len(item.content.strip()) > 20:
+            return item.access_count >= self._text_extract_min_access
+
+        return False
 
     def _should_archive(self, item: ContextItem) -> bool:
         """Check if item should be auto-archived based on stability."""

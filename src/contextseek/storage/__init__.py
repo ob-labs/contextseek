@@ -21,6 +21,7 @@ __all__ = [
     "VectorMemoryAdapter",
     "OceanBaseBackend",
     "OceanBaseGeoBackend",
+    "SeekDBBackend",
 ]
 
 
@@ -38,4 +39,8 @@ def __getattr__(name: str):
         from contextseek.storage.protocol import GeoSearchMixin
 
         return GeoSearchMixin
+    if name == "SeekDBBackend":
+        from contextseek.storage.seekdb_backend import SeekDBBackend
+
+        return SeekDBBackend
     raise AttributeError(name)

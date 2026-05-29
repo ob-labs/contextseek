@@ -176,6 +176,17 @@ def _build_adapter_from_settings(settings: Any) -> SeekVFSAdapter:
                 db_name=ob.db_name,
             )
         backend.initialize()
+    elif storage.backend == "seekdb":
+        from contextseek.storage.seekdb_backend import SeekDBBackend
+
+        seekdb = settings.seekdb
+        backend = SeekDBBackend(
+            path=seekdb.path,
+            database=seekdb.database,
+            host=seekdb.host,
+            port=seekdb.port,
+        )
+        backend.initialize()
     elif storage.backend == "file":
         backend = FileBackend(root_dir=storage.path)
         backend.initialize()
@@ -1738,6 +1749,17 @@ class ContextSeek:
 
         # 3. Build embedder (None if provider="none")
         embedder = build_embedder(settings.embedding)
+
+        # 3a. Zero-config embedding: when seekdb backend is active and no external
+        # embedder is configured, bridge pyseekdb's built-in all-MiniLM-L6-v2
+        # (384-dim ONNX, no API key) so retrieval uses vector search automatically.
+        if embedder is None and settings.storage.backend == "seekdb":
+            try:
+                import pyseekdb as _pyseekdb
+                _seekdb_ef = _pyseekdb.get_default_embedding_function()
+                embedder = lambda text, _ef=_seekdb_ef: _ef([text])[0]
+            except Exception:
+                pass
 
         # 3b. Build a shared LLM (None if provider="none") and reuse it for
         # the summarizer to avoid creating duplicate model instances.
