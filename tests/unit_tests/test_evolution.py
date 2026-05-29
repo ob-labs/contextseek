@@ -48,9 +48,17 @@ class TestHeuristicExtractor:
         assert len(results) >= 2  # input + tool + output
         assert all(r.stage == Stage.extracted for r in results)
 
-    def test_extract_non_trace_returns_empty(self):
+    def test_extract_plain_text_returns_extracted_item(self):
         extractor = HeuristicExtractor()
-        item = _make_item(content="plain text")
+        item = _make_item(content="plain text that is long enough to extract")
+        results = extractor.extract(item)
+        assert len(results) == 1
+        assert results[0].stage == Stage.extracted
+        assert "text_extracted" in (results[0].tags or [])
+
+    def test_extract_empty_text_returns_empty(self):
+        extractor = HeuristicExtractor()
+        item = _make_item(content="")
         results = extractor.extract(item)
         assert results == []
 

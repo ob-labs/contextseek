@@ -35,7 +35,7 @@ class HeuristicExtractor:
 
     def extract(self, item: ContextItem) -> list[ContextItem]:
         if not isinstance(item.content, dict):
-            return []
+            return self._extract_text(item)
 
         content = item.content
         results: list[ContextItem] = []
@@ -73,6 +73,18 @@ class HeuristicExtractor:
             )
 
         return results
+
+    def _extract_text(self, item: ContextItem) -> list[ContextItem]:
+        """Extract a plain-text item into a single extracted insight.
+
+        Uses the first 200 characters as the insight body when no LLM is
+        available, giving the convergence merger something to cluster on.
+        """
+        text = item.content_text.strip()
+        if not text:
+            return []
+        summary = text[:200]
+        return [self._make_insight(item, summary, "text_extracted")]
 
     def _make_insight(self, source: ContextItem, text: str, tag: str) -> ContextItem:
         return ContextItem(
