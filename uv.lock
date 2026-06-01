@@ -293,6 +293,7 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
+    { name = "rich" },
     { name = "seekvfs" },
     { name = "typing-extensions" },
 ]
@@ -379,6 +380,7 @@ requires-dist = [
     { name = "pyseekdb", marker = "extra == 'seekdb'" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.2.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rich", specifier = ">=13.7.0" },
     { name = "seekvfs", specifier = ">=0.1.0" },
     { name = "sqlalchemy", marker = "extra == 'oceanbase'", specifier = ">=2.0" },
     { name = "typing-extensions", specifier = ">=4.10.0" },

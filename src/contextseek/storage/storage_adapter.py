@@ -66,6 +66,17 @@ class SeekVFSStorageAdapter(
             return None
         return json.loads(fd.content)
 
+    def read_batch(self, refs: list[str]) -> dict[str, dict[str, Any]]:
+        """Read many refs in one VFS round-trip when the backend supports it."""
+        if not refs:
+            return {}
+        inner_refs = [self._to_inner(ref) for ref in refs]
+        batch = self._vfs.read_batch(inner_refs)
+        out: dict[str, dict[str, Any]] = {}
+        for inner_path, fd in batch.items():
+            out[self._to_outer(inner_path)] = json.loads(fd.content)
+        return out
+
     def search(
         self,
         prefix: str,

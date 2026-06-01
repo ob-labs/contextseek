@@ -7,6 +7,8 @@ Falls back gracefully with a clear ImportError when pyseekdb is not installed.
 from __future__ import annotations
 
 import fnmatch
+import contextlib
+import io
 import json
 import pathlib
 import threading
@@ -71,21 +73,39 @@ class SeekDBBackend(BackendProtocol):
 
         ef = self._ef or pyseekdb.get_default_embedding_function()
 
-        if self._host:
-            self._client = pyseekdb.Client(
-                host=self._host,
-                port=self._port,
-                database=self._database,
-            )
-        else:
-            pathlib.Path(self._path).mkdir(parents=True, exist_ok=True)
-            self._client = pyseekdb.Client(path=self._path, database=self._database)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
+            io.StringIO()
+        ):
+            if self._host:
+                admin = pyseekdb.AdminClient(host=self._host, port=self._port)
+                self._create_database_if_missing(admin)
+                self._client = pyseekdb.Client(
+                    host=self._host,
+                    port=self._port,
+                    database=self._database,
+                )
+            else:
+                pathlib.Path(self._path).mkdir(parents=True, exist_ok=True)
+                admin = pyseekdb.AdminClient(path=self._path)
+                self._create_database_if_missing(admin)
+                self._client = pyseekdb.Client(path=self._path, database=self._database)
 
-        self._collection = self._client.get_or_create_collection(
-            "context_items",
-            embedding_function=ef,
-        )
+            self._collection = self._client.get_or_create_collection(
+                "context_items",
+                embedding_function=ef,
+            )
         self.ensure_sync_table()
+
+    def _create_database_if_missing(self, admin: Any) -> None:
+        """Create the seekdb database before opening a Client connection."""
+        try:
+            admin.create_database(self._database)
+        except Exception as exc:
+            message = str(exc).lower()
+            if "exist" not in message and "duplicate" not in message:
+                # Client initialization below will surface a precise connection
+                # error if the database is still unavailable.
+                pass
 
     def close(self) -> None:
         pass
@@ -94,27 +114,66 @@ class SeekDBBackend(BackendProtocol):
     # Write / Read / Delete
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _index_text(payload: dict[str, Any]) -> str:
+        """Pick the text the vector / FTS index should be built over.
+
+        Prefers the L0 abstract, then the L1 summary, then the raw content —
+        so the index reflects what the item *means* rather than the full JSON
+        envelope (embedding arrays, provenance, timestamps).
+        """
+        for key in ("abstract", "summary"):
+            val = payload.get(key)
+            if isinstance(val, str) and val.strip():
+                return val
+        content = payload.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, dict):
+            for key in ("body", "description", "text", "content"):
+                val = content.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val
+            try:
+                return json.dumps(content, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return str(content)
+        return str(content) if content is not None else ""
+
     def write(self, path: str, content: bytes | str) -> None:
         doc = content.decode("utf-8") if isinstance(content, bytes) else content
         try:
             payload = json.loads(doc)
-            scope = str(payload.get("scope", ""))
-            item_hash = str(payload["hash"]) if payload.get("hash") else ""
-        except (json.JSONDecodeError, AttributeError):
-            scope = ""
-            item_hash = ""
+        except (json.JSONDecodeError, TypeError):
+            payload = None
 
         _, bare = _split_scheme(path)
-        metadata: dict[str, Any] = {"scope": scope, "bare_path": bare}
-        if item_hash:
-            metadata["hash"] = item_hash
+        metadata: dict[str, Any] = {"bare_path": bare, "payload": doc}
+
+        if isinstance(payload, dict):
+            metadata["scope"] = str(payload.get("scope", ""))
+            metadata["stage"] = str(payload.get("stage", ""))
+            metadata["searchable"] = 1 if payload.get("searchable", True) else 0
+            metadata["created_at"] = str(payload.get("created_at") or "")
+            if payload.get("hash"):
+                metadata["hash"] = str(payload["hash"])
+            index_text = self._index_text(payload)
+            embedding = payload.get("embedding")
+        else:
+            metadata["scope"] = ""
+            metadata["searchable"] = 1
+            index_text = doc
+            embedding = None
 
         with self._lock:
-            self._collection.upsert(
-                ids=[path],
-                documents=[doc],
-                metadatas=[metadata],
-            )
+            kwargs: dict[str, Any] = {
+                "ids": [path],
+                "documents": [index_text],
+                "metadatas": [metadata],
+            }
+            if isinstance(embedding, list) and embedding:
+                kwargs["embeddings"] = [embedding]
+            self._collection.upsert(**kwargs)
 
     # ------------------------------------------------------------------
     # Sync hash table (plain SQL — no vector index overhead)
@@ -125,11 +184,41 @@ class SeekDBBackend(BackendProtocol):
         return self._client._server._execute(sql) or []
 
     def ensure_sync_table(self) -> None:
-        """Create the sync_hashes table if it does not exist."""
+        """Create the sync bookkeeping tables if they do not exist."""
         self._sql(
             "CREATE TABLE IF NOT EXISTS contextseek_sync_hashes "
             "(scope VARCHAR(512) NOT NULL, hash CHAR(64) NOT NULL, "
             "PRIMARY KEY (scope, hash))"
+        )
+        # Per-file ingest records for the mtime fast-path (SHA256 authoritative).
+        self._sql(
+            "CREATE TABLE IF NOT EXISTS contextseek_sync_files "
+            "(scope VARCHAR(512) NOT NULL, path_hash CHAR(64) NOT NULL, "
+            "path VARCHAR(1024) NOT NULL, mtime DOUBLE NOT NULL, "
+            "content_hash CHAR(64) NOT NULL, PRIMARY KEY (scope, path_hash))"
+        )
+        # Key/value metadata (e.g. the embedding dimensionality in use).
+        self._sql(
+            "CREATE TABLE IF NOT EXISTS contextseek_meta "
+            "(k VARCHAR(128) NOT NULL, v VARCHAR(512) NOT NULL, PRIMARY KEY (k))"
+        )
+
+    def meta_get(self, key: str) -> str | None:
+        """Return a stored metadata value, or ``None`` when absent."""
+        from pyseekdb.client.sql_utils import escape_string
+
+        rows = self._sql(
+            f"SELECT v FROM contextseek_meta WHERE k = '{escape_string(key)}'"
+        )
+        return rows[0][0] if rows else None
+
+    def meta_set(self, key: str, value: str) -> None:
+        """Upsert a metadata key/value pair."""
+        from pyseekdb.client.sql_utils import escape_string
+
+        self._sql(
+            "REPLACE INTO contextseek_meta (k, v) VALUES "
+            f"('{escape_string(key)}', '{escape_string(value)}')"
         )
 
     def sync_hashes_for_scope(self, scope: str) -> set[str]:
@@ -160,12 +249,44 @@ class SeekDBBackend(BackendProtocol):
             f"INSERT IGNORE INTO contextseek_sync_hashes (scope, hash) VALUES {values}"
         )
 
+    def sync_files_for_scope(self, scope: str) -> dict[str, tuple[float, str]]:
+        """Return ``{path: (mtime, content_hash)}`` ingest records for *scope*."""
+        from pyseekdb.client.sql_utils import escape_string
+        rows = self._sql(
+            f"SELECT path, mtime, content_hash FROM contextseek_sync_files "
+            f"WHERE scope = '{escape_string(scope)}'"
+        )
+        return {row[0]: (float(row[1]), row[2]) for row in rows}
+
+    def visible_count_for_scope(self, scope: str) -> int:
+        """Return the number of items visible under the current metadata schema."""
+        return len(self._list_ids_for_scope(scope))
+
+    def sync_file_record(
+        self, scope: str, path: str, mtime: float, content_hash: str
+    ) -> None:
+        """Upsert one per-file ingest record (mtime + content hash)."""
+        import hashlib
+
+        from pyseekdb.client.sql_utils import escape_string
+
+        path_hash = hashlib.sha256(path.encode("utf-8")).hexdigest()
+        self._sql(
+            "REPLACE INTO contextseek_sync_files "
+            "(scope, path_hash, path, mtime, content_hash) VALUES "
+            f"('{escape_string(scope)}', '{path_hash}', "
+            f"'{escape_string(path)}', {float(mtime)}, '{content_hash}')"
+        )
+
     def read(self, path: str, hint: str | None = None) -> FileData:
-        result = self._collection.get(ids=[path], include=["documents"])
-        docs = result.get("documents") or []
-        if not docs or docs[0] is None:
+        result = self._collection.get(ids=[path], include=["metadatas"])
+        metas = result.get("metadatas") or []
+        if not metas or metas[0] is None:
             raise NotFoundError(path)
-        return FileData(docs[0].encode("utf-8"), "utf-8")
+        payload = metas[0].get("payload")
+        if payload is None:
+            raise NotFoundError(path)
+        return FileData(payload.encode("utf-8"), "utf-8")
 
     def read_full(self, path: str) -> FileData:
         return self.read(path)
@@ -173,14 +294,15 @@ class SeekDBBackend(BackendProtocol):
     def read_batch(self, paths: list[str]) -> dict[str, FileData]:
         if not paths:
             return {}
-        result = self._collection.get(ids=paths, include=["documents"])
+        result = self._collection.get(ids=paths, include=["metadatas"])
         ids = result.get("ids") or []
-        docs = result.get("documents") or []
-        return {
-            id_: FileData(doc.encode("utf-8"), "utf-8")
-            for id_, doc in zip(ids, docs)
-            if doc is not None
-        }
+        metas = result.get("metadatas") or []
+        out: dict[str, FileData] = {}
+        for id_, meta in zip(ids, metas):
+            payload = (meta or {}).get("payload")
+            if payload is not None:
+                out[id_] = FileData(payload.encode("utf-8"), "utf-8")
+        return out
 
     def delete(self, path: str) -> None:
         check = self._collection.get(ids=[path], include=[])
@@ -193,22 +315,75 @@ class SeekDBBackend(BackendProtocol):
     # Listing
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _scope_from_list_path(path: str) -> str | None:
+        """Map a list prefix like ``seekvfs://me/work/`` to stored metadata scope."""
+        _, bare = _split_scheme(path)
+        bare = bare.strip("/")
+        return bare or None
+
+    def _list_ids_for_scope(self, scope_key: str) -> list[str]:
+        """List collection ids for one scope via metadata index (not a full scan)."""
+        all_ids: list[str] = []
+        batch_size = 1000
+        offset = 0
+        while True:
+            result = self._collection.get(
+                where={"scope": {"$eq": scope_key}},
+                include=[],
+                limit=batch_size,
+                offset=offset,
+            )
+            ids = result.get("ids") or []
+            if not ids:
+                break
+            all_ids.extend(ids)
+            if len(ids) < batch_size:
+                break
+            offset += batch_size
+        return all_ids
+
+    def _list_all_ids(self) -> list[str]:
+        """List all ids in the collection, used only for root-level listings."""
+        total = self._collection.count()
+        all_ids: list[str] = []
+        batch_size = 1000
+        for offset in range(0, total, batch_size):
+            result = self._collection.get(
+                include=[],
+                limit=batch_size,
+                offset=offset,
+            )
+            all_ids.extend(result.get("ids") or [])
+        return all_ids
+
+    @staticmethod
+    def _bare_path(path: str) -> str:
+        """Return a stored id/path without its URI scheme."""
+        _, bare = _split_scheme(path)
+        return bare
+
     def ls(
         self,
         path: str,
         pattern: str | None = None,
         recursive: bool = False,
     ) -> list[FileInfo]:
-        prefix = path if path.endswith("/") else path + "/"
-        result = self._collection.get(include=[])
-        all_ids: list[str] = result.get("ids") or []
+        prefix = self._bare_path(path)
+        prefix = prefix if prefix.endswith("/") else prefix + "/"
+        scope_key = self._scope_from_list_path(path)
+        if scope_key:
+            all_ids = self._list_ids_for_scope(scope_key)
+        else:
+            all_ids = self._list_all_ids()
 
         now = datetime.now(tz=timezone.utc)
         out: list[FileInfo] = []
         for id_ in all_ids:
-            if not id_.startswith(prefix):
+            bare = self._bare_path(id_)
+            if not bare.startswith(prefix):
                 continue
-            rel = id_[len(prefix):]
+            rel = bare[len(prefix):]
             if not recursive and "/" in rel:
                 continue
             if pattern is not None and not fnmatch.fnmatch(rel, pattern):
@@ -257,31 +432,42 @@ class SeekDBBackend(BackendProtocol):
 
         n = max(1, min(limit * 3, total))  # over-fetch to allow path filtering
 
-        if query_embedding is not None:
-            result = self._collection.query(
-                query_embeddings=[query_embedding],
-                n_results=n,
-                include=["documents", "distances"],
-            )
-        else:
-            result = self._collection.query(
-                query_texts=[query] if query else None,
-                n_results=n,
-                include=["documents", "distances"],
-            )
+        def _run_query(where: dict[str, Any] | None) -> Any:
+            kwargs: dict[str, Any] = {
+                "n_results": n,
+                "include": ["metadatas", "distances"],
+            }
+            if where is not None:
+                kwargs["where"] = where
+            if query_embedding is not None:
+                kwargs["query_embeddings"] = [query_embedding]
+            else:
+                kwargs["query_texts"] = [query] if query else None
+            return self._collection.query(**kwargs)
+
+        # Prefer to drop soft-deleted items at the index level. Fall back to an
+        # unfiltered query when the predicate is unsupported or matches nothing
+        # (e.g. a pre-existing collection written before `searchable` metadata).
+        try:
+            result = _run_query({"searchable": {"$eq": 1}})
+            if not (result.get("ids") or [[]])[0]:
+                result = _run_query(None)
+        except Exception:
+            result = _run_query(None)
 
         ids_list: list[str] = (result.get("ids") or [[]])[0]
-        docs_list: list[str] = (result.get("documents") or [[]])[0]
+        metas_list: list[dict] = (result.get("metadatas") or [[]])[0]
         dist_list: list[float] = (result.get("distances") or [[]])[0]
 
         hits: list[SearchHit] = []
-        for id_, doc, dist in zip(ids_list, docs_list, dist_list):
+        for id_, meta, dist in zip(ids_list, metas_list, dist_list):
             if path_pattern and not fnmatch.fnmatch(id_, path_pattern):
                 continue
             score = max(0.0, 1.0 - float(dist))
             if score_threshold is not None and score < score_threshold:
                 continue
-            hits.append(SearchHit(path=id_, snippet=doc or "", score=score))
+            snippet = (meta or {}).get("payload") or ""
+            hits.append(SearchHit(path=id_, snippet=snippet, score=score))
 
         return SearchResult(query=query, hits=hits[:limit], searched_paths=ids_list)
 
@@ -290,16 +476,19 @@ class SeekDBBackend(BackendProtocol):
     # ------------------------------------------------------------------
 
     def edit(self, path: str, old: str, new: str) -> int:
-        result = self._collection.get(ids=[path], include=["documents"])
-        docs = result.get("documents") or []
-        if not docs or docs[0] is None:
+        result = self._collection.get(ids=[path], include=["metadatas"])
+        metas = result.get("metadatas") or []
+        if not metas or metas[0] is None:
             raise NotFoundError(path)
-        text = docs[0]
-        count = text.count(old)
+        payload = metas[0].get("payload")
+        if payload is None:
+            raise NotFoundError(path)
+        count = payload.count(old)
         if count == 0:
             return 0
-        with self._lock:
-            self._collection.upsert(ids=[path], documents=[text.replace(old, new)])
+        # Re-derive the index text and metadata from the edited payload so the
+        # stored document and the full JSON stay consistent.
+        self.write(path, payload.replace(old, new))
         return count
 
     def grep(
@@ -307,16 +496,17 @@ class SeekDBBackend(BackendProtocol):
         pattern: str,
         path_pattern: str | None = None,
     ) -> list[GrepMatch]:
-        result = self._collection.get(include=["documents"])
+        result = self._collection.get(include=["metadatas"])
         ids: list[str] = result.get("ids") or []
-        docs: list[str] = result.get("documents") or []
+        metas: list[dict] = result.get("metadatas") or []
         out: list[GrepMatch] = []
-        for id_, doc in zip(ids, docs):
+        for id_, meta in zip(ids, metas):
             if path_pattern and not fnmatch.fnmatch(id_, path_pattern):
                 continue
-            if not doc:
+            payload = (meta or {}).get("payload")
+            if not payload:
                 continue
-            for idx, line in enumerate(doc.splitlines(), start=1):
+            for idx, line in enumerate(payload.splitlines(), start=1):
                 if pattern in line:
                     out.append(GrepMatch(path=id_, line_number=idx, line=line))
         return out

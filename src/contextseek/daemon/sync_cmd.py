@@ -9,6 +9,7 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import os
 import pathlib
 import re
 from dataclasses import dataclass, field
@@ -30,6 +31,37 @@ _CODE_EXTENSIONS: set[str] = {
     ".sql",
 }
 
+_IGNORED_DIR_NAMES: set[str] = {
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "htmlcov",
+    "node_modules",
+    "site-packages",
+}
+
+
+def _iter_files(root: pathlib.Path) -> list[pathlib.Path]:
+    """Return files under root, skipping dependency/cache/build directories."""
+    files: list[pathlib.Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in _IGNORED_DIR_NAMES and not name.endswith(".egg-info")
+        ]
+        base = pathlib.Path(dirpath)
+        for filename in filenames:
+            files.append(base / filename)
+    return files
+
 
 @dataclass
 class SyncReport:
@@ -47,24 +79,13 @@ class SyncReport:
 def detect_format(path: str | pathlib.Path) -> str:
     """Detect the source format from path structure and file content.
 
-    Returns one of: obsidian, mixed_dir, markdown_dir, code_dir,
-    markdown_file, code_file, chatgpt_json, claude_json, bookmarks_html,
-    plaintext.
+    Returns one of: auto_dir, markdown_file, code_file, chatgpt_json,
+    claude_json, bookmarks_html, plaintext.
     """
     p = pathlib.Path(path).expanduser()
 
     if p.is_dir():
-        if (p / ".obsidian").exists():
-            return "obsidian"
-        has_docs = bool(list(p.rglob("*.md"))[:1] or list(p.rglob("*.txt"))[:1])
-        has_code = _has_code_files(p)
-        if has_docs and has_code:
-            return "mixed_dir"
-        if has_docs:
-            return "markdown_dir"
-        if has_code:
-            return "code_dir"
-        return "plaintext"
+        return "auto_dir"
 
     if p.is_file():
         name = p.name.lower()
@@ -91,7 +112,7 @@ def detect_format(path: str | pathlib.Path) -> str:
 
 def _has_code_files(root: pathlib.Path) -> bool:
     """Return True if any code file exists under root (fast early-exit scan)."""
-    for fp in root.rglob("*"):
+    for fp in _iter_files(root):
         if fp.is_file() and fp.suffix.lower() in _CODE_EXTENSIONS:
             return True
     return False
@@ -104,6 +125,50 @@ def _has_code_files(root: pathlib.Path) -> bool:
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _file_hash(p: pathlib.Path) -> str:
+    """Streamed SHA256 of a file's bytes (content-addressed dedup key)."""
+    h = hashlib.sha256()
+    with p.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class _FileGate:
+    """mtime-first / SHA256-authoritative skip filter for incremental sync.
+
+    mtime is only a fast pre-filter: an unchanged mtime means skip without
+    hashing. A changed mtime triggers a content hash; when the hash matches
+    the stored record the file is still skipped (copy / ``git checkout`` /
+    filesystem migration change mtime but not content) and the new mtime is
+    recorded so the next run short-circuits again.
+    """
+
+    def __init__(self, records: dict[str, tuple[float, str]]):
+        self._records = records
+        self.updates: dict[str, tuple[float, str]] = {}
+        self.skipped_files = 0
+
+    def should_process(self, p: pathlib.Path) -> bool:
+        key = p.as_posix()
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            return True
+        rec = self._records.get(key)
+        if rec is not None and abs(rec[0] - mtime) < 1e-6:
+            self.skipped_files += 1
+            return False
+        file_hash = _file_hash(p)
+        if rec is not None and rec[1] == file_hash:
+            # Content unchanged despite a new mtime — refresh mtime, skip parse.
+            self.updates[key] = (mtime, file_hash)
+            self.skipped_files += 1
+            return False
+        self.updates[key] = (mtime, file_hash)
+        return True
 
 
 def _existing_hashes(ctx: "ContextSeek", scope: str) -> set[str]:
@@ -144,7 +209,9 @@ def _parse_markdown_file(p: pathlib.Path) -> list[str]:
 def _parse_markdown_dir(root: pathlib.Path) -> list[tuple[str, str]]:
     """Yield (source_id, text) pairs from all markdown/txt files in a directory."""
     results: list[tuple[str, str]] = []
-    for fp in sorted(root.rglob("*.md")) + sorted(root.rglob("*.txt")):
+    for fp in sorted(
+        f for f in _iter_files(root) if f.suffix.lower() in (".md", ".txt")
+    ):
         try:
             for para in _parse_markdown_file(fp):
                 results.append((fp.as_posix(), para))
@@ -226,21 +293,85 @@ def _parse_code_file(p: pathlib.Path) -> list[str]:
     return _parse_generic_code_file(p)
 
 
-def _parse_dir(root: pathlib.Path, *, include_docs: bool, include_code: bool) -> list[tuple[str, str]]:
-    """Scan a directory for all supported file types."""
+def _parse_plaintext_file(p: pathlib.Path) -> list[str]:
+    """Split a generic text file into paragraph-like chunks."""
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    chunks: list[str] = []
+    for para in re.split(r"\n{2,}", text):
+        para = para.strip()
+        if len(para) > 20:
+            chunks.append(para)
+    return chunks
+
+
+def _is_probably_text_file(p: pathlib.Path, *, sample_size: int = 4096) -> bool:
+    """Cheap binary guard for auto directory scans."""
+    try:
+        sample = p.read_bytes()[:sample_size]
+    except OSError:
+        return False
+    if not sample:
+        return False
+    if b"\x00" in sample:
+        return False
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _parse_file_auto(p: pathlib.Path) -> list[tuple[str, str]]:
+    """Parse one file using the best available parser for that file."""
+    ext = p.suffix.lower()
+    name = p.name.lower()
+
+    if name == "bookmarks.html":
+        return _parse_bookmarks_html(p)
+
+    if ext in (".md", ".txt"):
+        return [(p.as_posix(), para) for para in _parse_markdown_file(p)]
+
+    if ext in _CODE_EXTENSIONS:
+        return [(p.as_posix(), chunk) for chunk in _parse_code_file(p)]
+
+    if ext == ".json":
+        try:
+            data = json.loads(p.read_bytes())
+        except (json.JSONDecodeError, OSError):
+            data = None
+        if isinstance(data, dict) and "mapping" in data:
+            return _parse_chatgpt_json(p)
+        if (
+            isinstance(data, list)
+            or (isinstance(data, dict) and "conversations" in data)
+        ):
+            return _parse_claude_json(p)
+
+    if _is_probably_text_file(p):
+        return [(p.as_posix(), para) for para in _parse_plaintext_file(p)]
+
+    return []
+
+
+def _parse_dir_auto(
+    root: pathlib.Path,
+    *,
+    should_process: "Callable[[pathlib.Path], bool] | None" = None,
+) -> list[tuple[str, str]]:
+    """Scan a directory and dispatch each file to its own parser."""
     results: list[tuple[str, str]] = []
-    for fp in sorted(root.rglob("*")):
+    for fp in sorted(_iter_files(root)):
         if not fp.is_file():
             continue
-        ext = fp.suffix.lower()
+        if should_process is not None and not should_process(fp):
+            continue
         try:
-            if include_docs and ext in (".md", ".txt"):
-                for para in _parse_markdown_file(fp):
-                    results.append((fp.as_posix(), para))
-            elif include_code and ext in _CODE_EXTENSIONS:
-                for chunk in _parse_code_file(fp):
-                    results.append((fp.as_posix(), chunk))
-        except OSError:
+            results.extend(_parse_file_auto(fp))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             continue
     return results
 
@@ -376,65 +507,70 @@ def sync_path(
         if on_progress is not None:
             on_progress(0, 0, 0)
         existing_hashes: set[str] = seekdb_backend.sync_hashes_for_scope(scope)
+        existing_file_records = seekdb_backend.sync_files_for_scope(scope)
+        if (
+            not dry_run
+            and seekdb_backend.visible_count_for_scope(scope) == 0
+            and (existing_hashes or existing_file_records)
+        ):
+            # The collection has no rows visible under the current metadata
+            # schema, but old sync bookkeeping says the files were imported.
+            # Treat the bookkeeping as stale so a clean unified re-import works
+            # without requiring users to manually delete the whole database.
+            existing_hashes = set()
+            existing_file_records = {}
+        # mtime fast-path: skip unchanged files before parsing/hashing.
+        gate: "_FileGate | None" = _FileGate(existing_file_records)
     else:
         if on_progress is not None:
             on_progress(0, 0, 0)
         existing_hashes = set() if dry_run else _existing_hashes(ctx, scope)
+        gate = None
+
+    def _should(fp: pathlib.Path) -> bool:
+        return gate.should_process(fp) if gate is not None else True
 
     # Build (source_id, text) pairs from the appropriate parser
     pairs: list[tuple[str, str]] = []
 
-    if fmt == "markdown_file":
-        for para in _parse_markdown_file(p):
-            pairs.append((p.as_posix(), para))
+    if fmt == "auto_dir":
+        pairs = _parse_dir_auto(p, should_process=_should)
+
+    elif fmt == "markdown_file":
+        if _should(p):
+            for para in _parse_markdown_file(p):
+                pairs.append((p.as_posix(), para))
 
     elif fmt == "code_file":
-        for chunk in _parse_code_file(p):
-            pairs.append((p.as_posix(), chunk))
-
-    elif fmt == "markdown_dir":
-        pairs = _parse_dir(p, include_docs=True, include_code=False)
-
-    elif fmt == "code_dir":
-        pairs = _parse_dir(p, include_docs=False, include_code=True)
-
-    elif fmt == "mixed_dir":
-        pairs = _parse_dir(p, include_docs=True, include_code=True)
+        if _should(p):
+            for chunk in _parse_code_file(p):
+                pairs.append((p.as_posix(), chunk))
 
     elif fmt == "chatgpt_json":
-        try:
-            pairs = _parse_chatgpt_json(p)
-        except (json.JSONDecodeError, KeyError, OSError) as exc:
-            report.errors.append(str(exc))
+        if _should(p):
+            try:
+                pairs = _parse_chatgpt_json(p)
+            except (json.JSONDecodeError, KeyError, OSError) as exc:
+                report.errors.append(str(exc))
 
     elif fmt == "claude_json":
-        try:
-            pairs = _parse_claude_json(p)
-        except (json.JSONDecodeError, KeyError, OSError) as exc:
-            report.errors.append(str(exc))
-
-    elif fmt == "obsidian":
-        # [[wikilinks]] are normalised to plain text by _parse_markdown_file;
-        # full link-graph construction (wikilink → ContextItem.links) is deferred.
-        pairs = _parse_dir(p, include_docs=True, include_code=False)
-        report.format_detected = "obsidian"
+        if _should(p):
+            try:
+                pairs = _parse_claude_json(p)
+            except (json.JSONDecodeError, KeyError, OSError) as exc:
+                report.errors.append(str(exc))
 
     elif fmt == "bookmarks_html":
-        try:
-            pairs = _parse_bookmarks_html(p)
-        except (OSError, Exception) as exc:
-            report.errors.append(str(exc))
+        if _should(p):
+            try:
+                pairs = _parse_bookmarks_html(p)
+            except (OSError, Exception) as exc:
+                report.errors.append(str(exc))
 
     else:
-        # plaintext fallback: split by paragraph
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-            for para in re.split(r"\n{2,}", text):
-                para = para.strip()
-                if len(para) > 20:
-                    pairs.append((p.as_posix(), para))
-        except OSError as exc:
-            report.errors.append(str(exc))
+        if _should(p):
+            for para in _parse_plaintext_file(p):
+                pairs.append((p.as_posix(), para))
 
     total = len(pairs)
     for source_id, text in pairs:
@@ -446,7 +582,16 @@ def sync_path(
             report.added += 1
         else:
             try:
-                ctx.add(text, scope=scope, source=source_id, source_type="document")
+                # Sync already performs content-hash deduplication. Skipping
+                # write-time conflict checks keeps bulk imports fast; use
+                # `contextseek lint` afterward for merge/contradiction review.
+                ctx.add(
+                    text,
+                    scope=scope,
+                    source=source_id,
+                    source_type="document",
+                    check_conflicts=False,
+                )
                 if seekdb_backend is not None:
                     seekdb_backend.sync_hash_add(scope, h)
                 existing_hashes.add(h)
@@ -455,5 +600,13 @@ def sync_path(
                 report.skipped += 1
         if on_progress is not None:
             on_progress(report.added, report.skipped, total)
+
+    # Persist per-file ingest records so the next run can short-circuit via mtime.
+    if gate is not None and not dry_run:
+        for file_path, (mtime, file_hash) in gate.updates.items():
+            try:
+                seekdb_backend.sync_file_record(scope, file_path, mtime, file_hash)
+            except Exception:
+                pass
 
     return report

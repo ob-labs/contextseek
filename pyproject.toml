@@ -28,6 +28,7 @@ dependencies = [
     "pyyaml>=6.0",
     "typing-extensions>=4.10.0",
     "langchain-openai>=1.1.10",
+    "rich>=13.7.0",
 ]
 
 [project.urls]

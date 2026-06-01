@@ -449,6 +449,12 @@ class ContextSeekSettings(BaseSettings):
         description="Default scope used by CLI commands when --scope is omitted. "
         "Set via DEFAULT_SCOPE env var or config.env.",
     )
+    skill_export_dir: str = Field(
+        default="",
+        description="Directory for materialized SKILL.md exports. "
+        "Set via SKILL_EXPORT_DIR env var or config.env; "
+        "empty falls back to ~/.contextseek/skills.",
+    )
 
 
 # ---------------------------------------------------------------------------

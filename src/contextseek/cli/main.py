@@ -4,12 +4,23 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 from collections.abc import Sequence
 
 from contextseek.client.contextseek import ContextSeek
 from contextseek.domain.serialization import (
     deserialize_context_item,
     serialize_context_item,
+)
+from contextseek.cli.ui import (
+    SyncProgress,
+    console,
+    overview_progress,
+    print_panel,
+    print_success,
+    render_daemon_status,
+    render_retrieve,
+    suppress_backend_noise,
 )
 
 
@@ -66,6 +77,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--full",
         action="store_true",
         help="return L2 full content instead of L1 summaries",
+    )
+    retrieve_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit machine-readable JSON instead of human-readable output",
+    )
+    retrieve_parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
 
     expand_parser = subparsers.add_parser(
@@ -133,6 +154,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     dream_parser.add_argument("--scope", default=None)
     dream_parser.add_argument("--dry-run", action="store_true")
+
+    # lint
+    lint_parser = subparsers.add_parser(
+        "lint", help="health-check the knowledge base: orphans, contradictions, distillation gaps"
+    )
+    lint_parser.add_argument("--scope", default=None)
+    lint_parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="auto-archive orphan items (low-risk automatic fix)",
+    )
+    lint_parser.add_argument(
+        "--show",
+        nargs=2,
+        metavar=("ID1", "ID2"),
+        default=None,
+        help="show full content of two items side-by-side (for contradiction review)",
+    )
+    lint_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit machine-readable JSON instead of human-readable output",
+    )
 
     # feedback
     feedback_parser = subparsers.add_parser(
@@ -204,6 +248,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="directory path (hermes) or JSON file path (openai/mcp)",
     )
 
+    # skill-export
+    se_parser = subparsers.add_parser(
+        "skill-export",
+        help="materialize prompt skills as SKILL.md files for agent tools",
+    )
+    se_parser.add_argument("--scope", default=None)
+    se_parser.add_argument(
+        "--out",
+        default=None,
+        help="output dir (default: SKILL_EXPORT_DIR or ~/.contextseek/skills)",
+    )
+    se_parser.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.8,
+        help="exclude skills below this provenance confidence (default 0.8)",
+    )
+    se_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="count what would be written/pruned without touching disk",
+    )
+    se_parser.add_argument(
+        "--no-prune",
+        action="store_true",
+        help="keep previously-exported skills that no longer exist",
+    )
+
     # items
     items_parser = subparsers.add_parser("items", help="list all items in a scope")
     items_parser.add_argument("--scope", default=None)
@@ -260,7 +332,59 @@ def run_cli(
     args = parser.parse_args(argv)
 
     settings = ContextSeekSettings()
-    ctx = client or ContextSeek.from_settings(settings=settings)
+
+    # Local scaffolding/process-state commands should not open the storage
+    # backend. This keeps `contextseek init` usable before seekdb exists.
+    if args.command == "init":
+        from contextseek.daemon.init_cmd import run_init
+        import pathlib
+
+        run_init(pathlib.Path.home() / ".contextseek")
+        return 0
+
+    if args.command == "daemon" and args.daemon_command in {"stop", "status"}:
+        from contextseek.daemon.process import DaemonProcess
+        import pathlib
+
+        config_dir = pathlib.Path(
+            getattr(args, "config_dir", None) or pathlib.Path.home() / ".contextseek"
+        )
+        daemon = DaemonProcess(config_dir=config_dir)
+
+        if args.daemon_command == "stop":
+            ok = daemon.stop()
+            print("stopped" if ok else "daemon not running")
+            return 0 if ok else 1
+
+        # Evolution stats from lifecycle log (last 7 days)
+        import datetime as _dt
+        from contextseek.daemon.logger import read_lifecycle_log
+        _log_path = config_dir / "logs" / "lifecycle.jsonl"
+        _entries = read_lifecycle_log(_log_path)
+        _evolved = None
+        _merged = None
+        if _entries:
+            _cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=7)
+            _recent = []
+            for _e in _entries:
+                _ts = _e.get("ts")
+                if _ts:
+                    try:
+                        if _dt.datetime.fromisoformat(_ts) > _cutoff:
+                            _recent.append(_e)
+                    except ValueError:
+                        pass
+            if _recent:
+                _evolved = sum(_e.get("evolved_count", 0) for _e in _recent)
+                _merged = sum(_e.get("merged_count", 0) for _e in _recent)
+        render_daemon_status(daemon.status(), evolved=_evolved, merged=_merged)
+        return 0
+
+    if client is None:
+        with suppress_backend_noise():
+            ctx = ContextSeek.from_settings(settings=settings)
+    else:
+        ctx = client
 
     # Resolve --scope early: fill in default_scope when --scope is omitted.
     if hasattr(args, "scope"):
@@ -280,18 +404,23 @@ def run_cli(
         return 0
 
     if args.command == "retrieve":
-        response = ctx.retrieve(
-            args.query,
-            scope=args.scope,
-            k=args.k,
-            full=args.full,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            response = ctx.retrieve(
+                args.query,
+                scope=args.scope,
+                k=args.k,
+                full=args.full,
+            )
         output = {
             "items": [
                 {
                     "id": h.item.id,
                     "score": h.score,
                     "layer": h.layer,
+                    "stage": h.item.stage.value,
+                    "source": h.item.provenance.source_id,
+                    "abstract": h.item.abstract,
                     "summary": h.item.summary,
                     "content": h.item.content_text if h.layer == "full" else None,
                 }
@@ -303,7 +432,10 @@ def run_cli(
                 "hint": response.meta.hint,
             },
         }
-        print(json.dumps(output, ensure_ascii=False))
+        if args.json:
+            print(json.dumps(output, ensure_ascii=False))
+        else:
+            render_retrieve(args.scope, args.query, response)
         return 0
 
     if args.command == "expand":
@@ -366,7 +498,12 @@ def run_cli(
         return 0
 
     if args.command == "overview":
-        report = ctx.overview(scope=args.scope)
+        from contextseek.domain.stages import Stage
+
+        with suppress_backend_noise(), overview_progress():
+            all_items = ctx.items(scope=args.scope)
+            report = ctx.overview_from_items(all_items, scope=args.scope)
+
         if args.json:
             print(
                 json.dumps(
@@ -383,23 +520,20 @@ def run_cli(
         else:
             from contextseek.cli.overview_renderer import render_overview
             from contextseek.daemon.logger import read_lifecycle_log
-            from contextseek.domain.stages import Stage
             import pathlib
 
-            skills = ctx.skills(args.scope)
+            skills = [it for it in all_items if it.stage == Stage.skill]
 
-            # Items approaching distillation threshold (access_count >= 3 but < 5)
-            all_items = ctx.items(scope=args.scope)
+            distill_threshold = 5
             growing = [
                 it
                 for it in all_items
                 if it.stage != Stage.skill
                 and not it.is_deleted
-                and it.access_count >= 3
+                and 3 <= it.access_count < distill_threshold
             ]
             growing.sort(key=lambda x: x.access_count, reverse=True)
 
-            # Last evolution time from lifecycle log
             log_path = pathlib.Path.home() / ".contextseek" / "logs" / "lifecycle.jsonl"
             last_evolution = None
             if log_path.exists():
@@ -415,16 +549,29 @@ def run_cli(
 
             storage_backend = _get_backend_label(ctx)
 
-            print(
-                render_overview(
-                    scope=args.scope,
-                    skills=skills,
-                    report=report,
-                    last_evolution=last_evolution,
-                    growing_items=growing,
-                    backend_label=storage_backend,
-                )
+            lint_rpt = None
+            try:
+                from contextseek.evolution.lint import run_lint
+
+                lint_rpt = run_lint(all_items, scope=args.scope, quick=True)
+            except Exception:
+                pass
+
+            overview_text = render_overview(
+                scope=args.scope,
+                skills=skills,
+                report=report,
+                last_evolution=last_evolution,
+                growing_items=growing,
+                distill_threshold=distill_threshold,
+                backend_label=storage_backend,
+                all_items=all_items,
+                lint_report=lint_rpt,
             )
+            if console:
+                console.print(overview_text)
+            else:
+                print(overview_text)
         return 0
 
     if args.command == "tools":
@@ -455,6 +602,80 @@ def run_cli(
                 ensure_ascii=False,
             )
         )
+        return 0
+
+    if args.command == "lint":
+        from contextseek.evolution.lint import run_lint
+        from contextseek.evolution.distiller import HeuristicDistillRule
+
+        all_items = ctx.items(scope=args.scope)
+
+        if args.show:
+            # Side-by-side comparison for contradiction review
+            id1, id2 = args.show
+            matched = {it.id: it for it in all_items if it.id.startswith(id1) or it.id.startswith(id2)}
+            for iid in (id1, id2):
+                it = next((v for k, v in matched.items() if k.startswith(iid)), None)
+                if it:
+                    print(f"\n  [{iid[:8]}] stage={it.stage.value}  access={it.access_count}")
+                    print(f"  {it.content_text[:400]}")
+                else:
+                    print(f"\n  [{iid[:8]}] not found")
+            return 0
+
+        rule = HeuristicDistillRule()
+        report = run_lint(all_items, scope=args.scope, heuristic_rule=rule)
+
+        if args.json:
+            print(json.dumps(report.to_dict(), ensure_ascii=False))
+            return 0
+
+        # Human-readable output
+        from contextseek.cli.overview_renderer import _divider
+        print()
+        print(f"  ContextSeek · {args.scope}  knowledge-base health check")
+        print()
+
+        if report.contradictions:
+            print(_divider("⚠ Potential contradictions"))
+            for c in report.contradictions:
+                print(f"    #{c.item_a_id[:8]}  {c.preview_a[:60]!r}")
+                print(f"      ← #{c.item_b_id[:8]}  {c.preview_b[:60]!r}  (sim={c.similarity})")
+                print(f"      contextseek lint --scope {args.scope} --show {c.item_a_id[:8]} {c.item_b_id[:8]}")
+            print()
+
+        if report.orphans:
+            print(_divider("○ Orphan items"))
+            for o in report.orphans[:10]:
+                print(f"    #{o.item_id[:8]}  stage={o.stage}  {o.content_preview[:60]!r}")
+            if len(report.orphans) > 10:
+                print(f"    ... and {len(report.orphans) - 10} more")
+            if args.fix:
+                archived = 0
+                for o in report.orphans:
+                    ref = ctx.resolver.ref_for(args.scope, o.item_id)
+                    try:
+                        ctx.forget(ref, scope=args.scope, reason="lint_auto_archive_orphan")
+                        archived += 1
+                    except Exception:
+                        pass
+                print(f"    --fix: archived {archived} orphan items")
+            print()
+
+        if report.distill_opportunities:
+            print(_divider("✦ Distillation opportunities"))
+            for d in report.distill_opportunities:
+                print(
+                    f"    #{d.item_id[:8]}  access={d.access_count}"
+                    f"  stage={d.stage}  {d.content_preview[:50]!r}"
+                )
+            print()
+
+        bar = "█" * (report.health_score // 10) + "░" * (10 - report.health_score // 10)
+        print(f"  Health  {bar}  {report.health_score}/100")
+        if not report.is_healthy():
+            print("  Run `contextseek compact` to distill items, or `contextseek dream` to consolidate knowledge.")
+        print()
         return 0
 
     if args.command == "feedback":
@@ -544,6 +765,37 @@ def run_cli(
         )
         return 0
 
+    if args.command == "skill-export":
+        from contextseek.daemon.skill_export import export_skills
+        import pathlib as _pl
+
+        out_dir = (
+            args.out
+            or settings.skill_export_dir
+            or str(_pl.Path.home() / ".contextseek" / "skills")
+        )
+        out_path = _pl.Path(out_dir).expanduser()
+        subtitle = "dry-run" if args.dry_run else None
+        print_panel(
+            "ContextSeek skill-export",
+            f"scope: {args.scope}\nout  : {out_path}\nmin-confidence: {args.min_confidence}",
+            subtitle=subtitle,
+        )
+        report = export_skills(
+            ctx,
+            scope=args.scope,
+            out_dir=out_path,
+            min_confidence=args.min_confidence,
+            dry_run=args.dry_run,
+            prune=not args.no_prune,
+        )
+        verb = "would write" if args.dry_run else "wrote"
+        print_success(
+            f"{verb} {report.written}  unchanged {report.unchanged}  "
+            f"pruned {report.pruned}  skipped(low-confidence) {report.skipped_low_confidence}"
+        )
+        return 0
+
     if args.command == "items":
         from contextseek.domain.stages import Stage
 
@@ -555,13 +807,6 @@ def run_cli(
                 ensure_ascii=False,
             )
         )
-        return 0
-
-    if args.command == "init":
-        from contextseek.daemon.init_cmd import run_init
-        import pathlib
-
-        run_init(pathlib.Path.home() / ".contextseek")
         return 0
 
     if args.command == "daemon":
@@ -606,46 +851,6 @@ def run_cli(
                 return 1
             return 0
 
-        if args.daemon_command == "stop":
-            ok = daemon.stop()
-            print("stopped" if ok else "daemon not running")
-            return 0 if ok else 1
-
-        if args.daemon_command == "status":
-            info = daemon.status()
-            if info["running"]:
-                print(f"  contextseek daemon  ·  running  (PID {info['pid']})")
-                if info.get("uptime"):
-                    print(f"  uptime: {info['uptime']}")
-                for k, v in info.get("components", {}).items():
-                    mark = "✓" if v else "✗"
-                    print(f"    {k:<24}  {mark}")
-            else:
-                print("  contextseek daemon  ·  not running")
-
-            # Evolution stats from lifecycle log (last 7 days)
-            import datetime as _dt
-            from contextseek.daemon.logger import read_lifecycle_log
-            _log_path = config_dir / "logs" / "lifecycle.jsonl"
-            _entries = read_lifecycle_log(_log_path)
-            if _entries:
-                _cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=7)
-                _recent = []
-                for _e in _entries:
-                    _ts = _e.get("ts")
-                    if _ts:
-                        try:
-                            if _dt.datetime.fromisoformat(_ts) > _cutoff:
-                                _recent.append(_e)
-                        except ValueError:
-                            pass
-                if _recent:
-                    _evolved = sum(_e.get("evolved_count", 0) for _e in _recent)
-                    _merged = sum(_e.get("merged_count", 0) for _e in _recent)
-                    print(f"\n  演化统计（最近 7 天）")
-                    print(f"    已演化 item: {_evolved}  ·  合并去重: {_merged}")
-            return 0
-
         if args.daemon_command == "restart":
             daemon.stop()
             import time
@@ -680,45 +885,45 @@ def run_cli(
     if args.command == "sync":
         from contextseek.daemon.sync_cmd import detect_format, sync_path
         import pathlib as _pl
-        import sys as _sys
 
         _p = _pl.Path(args.path).expanduser()
         fmt = detect_format(_p)
-        print(f"  format : {fmt}")
-        print(f"  scope  : {args.scope}")
-        if args.dry_run:
-            print("  mode   : dry-run")
-        print("  scanning ...", flush=True)
-
-        def _progress(added: int, skipped: int, total: int) -> None:
-            if total == 0:
-                _sys.stdout.write("\r  loading existing hashes ...              ")
-                _sys.stdout.flush()
-                return
-            done = added + skipped
-            pct = int(done * 100 / total) if total else 100
-            _sys.stdout.write(
-                f"\r  [{pct:3d}%] {done}/{total}  added={added}  skipped={skipped}  "
-            )
-            _sys.stdout.flush()
-
-        report = sync_path(
-            ctx, args.path, scope=args.scope,
-            dry_run=args.dry_run, on_progress=_progress,
+        format_label = {
+            "auto_dir": "auto-detected directory",
+            "markdown_file": "Markdown/text file",
+            "code_file": "code file",
+            "chatgpt_json": "ChatGPT export",
+            "claude_json": "Claude export",
+            "bookmarks_html": "browser bookmarks",
+            "plaintext": "plain text",
+        }.get(fmt, fmt)
+        subtitle = "dry-run" if args.dry_run else None
+        print_panel(
+            "ContextSeek sync",
+            f"format: {format_label}\nscope : {args.scope}\npath  : {_p}",
+            subtitle=subtitle,
         )
 
-        # Clear the progress line
-        _sys.stdout.write("\r" + " " * 60 + "\r")
-        _sys.stdout.flush()
+        with SyncProgress() as progress:
+            report = sync_path(
+                ctx,
+                args.path,
+                scope=args.scope,
+                dry_run=args.dry_run,
+                on_progress=progress.update,
+            )
 
         if report.errors:
             for err in report.errors:
                 print(f"  error  : {err}")
 
         if args.dry_run:
-            print(f"  [dry-run] would import {report.added} items ({report.skipped} already exist)")
+            print_success(
+                f"dry-run: would import {report.added} items "
+                f"({report.skipped} already exist)"
+            )
         else:
-            print(f"  done   : added {report.added}  skipped {report.skipped}")
+            print_success(f"done: added {report.added}  skipped {report.skipped}")
         return 0
 
     return 1

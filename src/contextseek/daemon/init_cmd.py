@@ -38,8 +38,8 @@ SEEKDB_PATH=~/.contextseek/seekdb.db
 # LLM_MODEL=gpt-4o-mini
 # LLM_API_KEY=sk-...
 
-# --- Default scope (optional) ---
-# DEFAULT_SCOPE=me/notes                 # omit --scope from CLI commands
+# --- Default scope ---
+DEFAULT_SCOPE=me/work                   # omit --scope from CLI commands
 
 # --- Evolution ---
 EVOLUTION_ENABLED=true
@@ -47,6 +47,14 @@ LIFECYCLE_INTERVAL_SECONDS=3600         # auto-evolve every hour
 
 # --- File watching (optional: auto-sync directories on change) ---
 # WATCH_PATHS=~/notes:me/work,~/Documents/research:me/research
+
+# --- Skill export (materialize distilled prompt skills as SKILL.md) ---
+# When enabled, the daemon writes stage=skill items to SKILL_EXPORT_DIR after
+# each evolution cycle, so agent tools (Claude Code, Qoder, ...) can pick them up.
+# Do NOT point WATCH_PATHS at SKILL_EXPORT_DIR — that would re-ingest the exports.
+SKILL_EXPORT_ENABLED=false
+SKILL_EXPORT_DIR=~/.contextseek/skills
+SKILL_EXPORT_MIN_CONFIDENCE=0.8
 """
 
 _MCP_JSON_TEMPLATE = {
@@ -102,6 +110,76 @@ _LAUNCHD_PLIST = """\
 """
 
 
+def _claude_desktop_config_path() -> pathlib.Path:
+    """Return the platform-specific Claude Desktop config path."""
+    home = pathlib.Path.home()
+    system = platform.system()
+    if system == "Darwin":
+        return (
+            home
+            / "Library"
+            / "Application Support"
+            / "Claude"
+            / "claude_desktop_config.json"
+        )
+    if system == "Windows":
+        appdata = os.environ.get("APPDATA")
+        base = pathlib.Path(appdata) if appdata else home / "AppData" / "Roaming"
+        return base / "Claude" / "claude_desktop_config.json"
+    # Linux / other
+    return home / ".config" / "Claude" / "claude_desktop_config.json"
+
+
+def _maybe_merge_claude_desktop() -> None:
+    """Detect Claude Desktop's config and offer to add the contextseek server.
+
+    Skips silently when the config is absent or the session is non-interactive,
+    leaving the user to copy the snippet from ``mcp.json`` manually.
+    """
+    cfg_path = _claude_desktop_config_path()
+    if not cfg_path.exists():
+        return
+
+    server_entry = _MCP_JSON_TEMPLATE["mcpServers"]["contextseek"]
+    try:
+        existing = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        print(f"  Claude Desktop config at {cfg_path} is unreadable; skipping merge.")
+        return
+
+    servers = existing.get("mcpServers")
+    if isinstance(servers, dict) and servers.get("contextseek") == server_entry:
+        print("  Claude Desktop already has the contextseek MCP server.")
+        return
+
+    print(f"  Found Claude Desktop config: {cfg_path}")
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("    Non-interactive session; add the contextseek entry from mcp.json manually.")
+        return
+    try:
+        answer = input("  Merge contextseek into Claude Desktop config? [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in ("y", "yes"):
+        print("    Skipped; you can merge it later from mcp.json.")
+        return
+
+    # Back up before mutating, then merge the server entry.
+    try:
+        backup = cfg_path.with_suffix(cfg_path.suffix + ".contextseek.bak")
+        backup.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+        if not isinstance(existing.get("mcpServers"), dict):
+            existing["mcpServers"] = {}
+        existing["mcpServers"]["contextseek"] = server_entry
+        cfg_path.write_text(
+            json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        )
+        print(f"    Merged. Backup written to {backup}")
+        print("    Restart Claude Desktop to pick up the contextseek server.")
+    except OSError as exc:
+        print(f"    Merge failed: {exc}")
+
+
 def _find_contextseek_bin() -> str:
     """Locate the contextseek CLI binary."""
     found = shutil.which("contextseek")
@@ -142,6 +220,9 @@ def run_init(config_dir: pathlib.Path) -> None:
         print(f"  Created  {mcp_json}")
     else:
         print(f"  Exists   {mcp_json}  (not overwritten)")
+
+    # Offer to merge the contextseek server into Claude Desktop's config.
+    _maybe_merge_claude_desktop()
 
     print()
 

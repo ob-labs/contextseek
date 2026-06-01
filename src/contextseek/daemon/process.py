@@ -59,7 +59,28 @@ class DaemonProcess:
         from contextseek.policies.lifecycle import LifecycleScheduler
 
         logger = LifecycleLogger(log_path)
-        self._scheduler = LifecycleScheduler(client=ctx, on_event=logger)
+
+        # Optional: materialize distilled prompt skills as SKILL.md after each cycle.
+        export_dir: pathlib.Path | None = None
+        if self._load_config_value("SKILL_EXPORT_ENABLED", "false").lower() == "true":
+            raw_dir = self._load_config_value(
+                "SKILL_EXPORT_DIR", "~/.contextseek/skills"
+            )
+            export_dir = pathlib.Path(raw_dir).expanduser()
+        try:
+            export_min_confidence = float(
+                self._load_config_value("SKILL_EXPORT_MIN_CONFIDENCE", "0.8")
+            )
+        except ValueError:
+            export_min_confidence = 0.8
+
+        self._scheduler = LifecycleScheduler(
+            client=ctx,
+            on_event=logger,
+            snapshot_dir=self._config_dir / "backups",
+            export_dir=export_dir,
+            export_min_confidence=export_min_confidence,
+        )
 
         # Register scopes from config (WATCH_PATHS doubles as scope list)
         watch_entries = self._load_watch_paths()
@@ -195,6 +216,20 @@ class DaemonProcess:
             return int(self._pid_file.read_text().strip())
         except (ValueError, OSError):
             return None
+
+    def _load_config_value(self, key: str, default: str) -> str:
+        """Read a single ``KEY=value`` line from config.env (last wins)."""
+        config_env = self._config_dir / "config.env"
+        if not config_env.exists():
+            return default
+        prefix = f"{key}="
+        value = default
+        for line in config_env.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("#") or not line.startswith(prefix):
+                continue
+            value = line[len(prefix):].strip().strip('"').strip("'")
+        return value
 
     def _load_watch_paths(self) -> list[tuple[str, str]]:
         """Parse WATCH_PATHS from config.env.
