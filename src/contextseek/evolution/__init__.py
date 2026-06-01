@@ -5,7 +5,11 @@ Plus dreaming: consolidation + divergence for creative evolution.
 """
 
 from contextseek.evolution.engine import EvolutionEngine
-from contextseek.evolution.extractor import HeuristicExtractor, LLMExtractor
+from contextseek.evolution.extractor import (
+    GeoExtractor,
+    HeuristicExtractor,
+    LLMExtractor,
+)
 from contextseek.evolution.merger import ConvergenceMerger
 from contextseek.evolution.distiller import SkillDistiller
 from contextseek.evolution.dreaming import (
@@ -29,6 +33,7 @@ __all__ = [
     "DreamReport",
     "EvolutionEngine",
     "EvolutionRule",
+    "GeoExtractor",
     "HeuristicExtractor",
     "LLMExtractor",
     "SkillDistiller",

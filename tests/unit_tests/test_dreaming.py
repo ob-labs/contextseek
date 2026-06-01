@@ -6,7 +6,7 @@ from contextseek.config.strategies import DreamStrategy
 from contextseek.domain.context_item import ContextItem, _generate_id, _utc_now
 from contextseek.domain.links import LinkType
 from contextseek.domain.provenance import Provenance, SourceType
-from contextseek.domain.stages import Stability, Stage
+from contextseek.domain.stages import STAGE_CONFIDENCE, Stability, Stage
 from contextseek.evolution.dreaming import (
     ConsolidationEngine,
     ConsolidationResult,
@@ -172,6 +172,56 @@ class TestConsolidationEngine:
             for link in pattern.links:
                 assert link.relation == LinkType.synthesized_from
                 assert link.target_id in source_ids
+
+    def test_consolidation_content_is_pattern_plus_evidence(self):
+        """Consolidation item content carries the summary plus primary_evidence."""
+        strategy = DreamStrategy(
+            consolidation_min_access=1,
+            consolidation_similarity_range=(0.2, 0.9),
+        )
+        engine = ConsolidationEngine(strategy=strategy)
+
+        items = [
+            _make_item(content="shared topic alpha beta gamma delta"),
+            _make_item(content="shared topic alpha beta gamma epsilon"),
+        ]
+
+        result = engine.consolidate(items)
+        assert result.items
+        pattern = result.items[0]
+        assert isinstance(pattern.content, dict)
+        assert "pattern" in pattern.content
+        assert "primary_evidence" in pattern.content
+        # Clean summary string is preserved on abstract for embeddings/display.
+        assert pattern.abstract == pattern.content["pattern"]
+
+    def test_consolidation_primary_evidence_picks_highest_stage(self):
+        """primary_evidence is the cluster's highest-authority (stage) source."""
+        strategy = DreamStrategy(
+            consolidation_min_access=1,
+            consolidation_similarity_range=(0.2, 0.9),
+        )
+        engine = ConsolidationEngine(strategy=strategy)
+
+        # Same text so they cluster; different stages so authority differs.
+        raw_item = _make_item(
+            content="commute destination alpha beta gamma",
+            stage=Stage.raw,
+        )
+        knowledge_item = _make_item(
+            content="commute destination alpha beta delta",
+            stage=Stage.knowledge,
+        )
+
+        result = engine.consolidate([raw_item, knowledge_item])
+        assert result.items
+        ev = result.items[0].content["primary_evidence"]
+        # knowledge (0.85) beats raw (0.3)
+        assert ev["stage"] == Stage.knowledge.value
+        assert ev["confidence"] == STAGE_CONFIDENCE[Stage.knowledge]
+        assert ev["source_id"] == knowledge_item.id
+        # Source content is preserved verbatim (generic — no field inspection).
+        assert ev["content"] == knowledge_item.content
 
     def test_consolidation_strengthened_links(self):
         """Cluster pairs get strengthened_links recorded."""

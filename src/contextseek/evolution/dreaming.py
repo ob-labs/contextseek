@@ -20,7 +20,7 @@ from contextseek.config.strategies import DreamStrategy
 from contextseek.domain.context_item import ContextItem, _generate_id, _utc_now
 from contextseek.domain.links import Link, LinkType
 from contextseek.domain.provenance import Provenance, SourceType
-from contextseek.domain.stages import Stability, Stage
+from contextseek.domain.stages import STAGE_CONFIDENCE, Stability, Stage
 from contextseek.llm.prompts import (
     LLMPromptTemplates,
     dream_consolidation_prompt,
@@ -208,9 +208,29 @@ class ConsolidationEngine:
             else:
                 pattern_text = f"Pattern: common theme across {len(cluster)} items with tags [{', '.join(sorted(common_tags))}]"
 
+        # Attach the cluster's highest-authority source as structured "primary
+        # evidence", so the structured fields a source carries (geo, tags, ...)
+        # are preserved through consolidation instead of being lost to the
+        # natural-language summary. Authority is the stage trust ranking
+        # (raw < extracted < knowledge < skill) from STAGE_CONFIDENCE; ties
+        # break on insertion order (cluster is already sorted by decay score).
+        # This is generic: it copies the source content verbatim and never
+        # inspects domain-specific fields.
+        primary = max(cluster, key=lambda it: STAGE_CONFIDENCE.get(it.stage, 0.3))
+        primary_evidence = {
+            "source_id": primary.id,
+            "stage": primary.stage.value,
+            "confidence": STAGE_CONFIDENCE.get(primary.stage, 0.3),
+            "content": primary.content,
+        }
+
         return ContextItem(
             id=_generate_id(),
-            content=pattern_text,
+            # content is a dict: the LLM/fallback summary plus the highest-authority
+            # source verbatim. ``abstract`` keeps the clean summary string so the
+            # embedding source and tight-budget display stay text, not str(dict).
+            content={"pattern": pattern_text, "primary_evidence": primary_evidence},
+            abstract=pattern_text,
             scope=cluster[0].scope,
             provenance=Provenance(
                 source_type=SourceType.dream_consolidation,

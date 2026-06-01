@@ -78,6 +78,7 @@ class RetrievalOrchestrator:
         include_deleted: bool = False,
         with_stats: bool = False,
         geo_query: Any | None = None,
+        min_score: float | None = None,
     ) -> list[SearchHit] | tuple[list[SearchHit], RetrievalStats]:
         """Recall, dedupe, rerank and return SearchHit results.
 
@@ -89,6 +90,12 @@ class RetrievalOrchestrator:
             tags: Optional tags filter — only include items having ALL these tags.
             include_deleted: Whether to include soft-deleted items.
             with_stats: If True, return (hits, stats) tuple.
+            min_score: Optional threshold applied to the reranker's raw ``_score``
+                (falling back to ``score``) right after rerank and before the
+                ``[:k]`` cut and min-max output normalization. Because it filters
+                the reranker's native score, the meaningful threshold range shifts
+                with the active reranker — callers own picking a sensible value.
+                ``None`` (default) disables the filter.
         """
         strategy = self.strategy or RetrievalStrategy()
         recall_route = self._build_recall_route(strategy)
@@ -144,11 +151,21 @@ class RetrievalOrchestrator:
                         stream_hits.append(routed)
                     ranked_streams.append((stream_id, stream_hits))
 
-        # ─── Filter: deleted, stage, tags ─────────────────────────
+        # ─── Filter: deleted, searchable, stage, tags ─────────────
         # Filtering happens before RRF so excluded items don't consume rank
         # slots in the fusion. We filter the per-stream lists in place.
+        #
+        # ``searchable`` defaults to True on legacy payloads that predate the
+        # field (``payload.get("searchable", True)``). Items explicitly marked
+        # ``searchable=False`` are hidden from all recall channels — this is
+        # how the evolution pipeline expresses "this raw item has been
+        # consumed into an extracted/knowledge successor and should no longer
+        # surface in normal retrieval". Side-channel APIs (``ctx.items`` /
+        # ``ctx._list_items``) bypass this filter and still see the row.
         def _keep(h: dict[str, object]) -> bool:
             if not include_deleted and h.get("deleted_at"):
+                return False
+            if h.get("searchable", True) is False:
                 return False
             if stage is not None and h.get("stage") != stage.value:
                 return False
@@ -220,6 +237,10 @@ class RetrievalOrchestrator:
         reranked = reranker.rerank(
             list(merged.values()), query=query, strategy=strategy, geo_query=geo_query
         )
+        if min_score is not None:
+            reranked = [
+                p for p in reranked if _passes_min_score(p, min_score, strategy)
+            ]
         limited = reranked[:k]
         normalized_scores = _normalize_output_scores(
             [
@@ -280,6 +301,28 @@ def _build_provenance_summary(item: ContextItem) -> str:
     if prov.verified:
         parts.append("verified")
     return "; ".join(parts)
+
+
+def _passes_min_score(
+    payload: dict[str, object],
+    min_score: float,
+    strategy: RetrievalStrategy,
+) -> bool:
+    """Stage-adjusted min_score check.
+
+    Compares _score against min_score * stage_weight, which cancels out the
+    stage multiplier baked into _score. This means min_score=0.5 always means
+    'base relevance >= 50%' regardless of the item's stage maturity — stage
+    only affects ranking order, not eligibility.
+    """
+    from contextseek.retrieval.components import _resolve_stage_weight
+
+    score = float(payload.get("_score", payload.get("score", 0.0)))
+    stage = str(payload.get("stage") or "raw").lower()
+    stage_weight = _resolve_stage_weight(strategy, stage)
+    if stage_weight is None:
+        stage_weight = _resolve_stage_weight(strategy, "raw") or 1.0
+    return score >= min_score * stage_weight
 
 
 def _normalize_output_scores(scores: list[float]) -> list[float]:

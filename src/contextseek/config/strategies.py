@@ -33,9 +33,9 @@ class RetrievalStrategy:
     # Stage weights for scoring
     stage_weights: tuple[tuple[str, float], ...] = (
         ("skill", 1.0),
-        ("knowledge", 0.85),
-        ("extracted", 0.6),
-        ("raw", 0.3),
+        ("knowledge", 0.90),
+        ("extracted", 0.70),
+        ("raw", 0.45),
     )
     # Importance-aware ranking: importance^importance_alpha is used as a score
     # multiplier so that lower-importance items rank lower even with high semantic

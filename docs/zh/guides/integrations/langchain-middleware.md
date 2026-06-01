@@ -56,7 +56,7 @@ Middleware 会基于传入的 `model` 与 `embedder` 自动构建一个 `Context
 | `before_agent` | 解析当前 session 的 scope（构造参数 `scope=` → `runtime.thread_id` → `"default"`）并写入 `ContextVar` |
 | `wrap_model_call` / `awrap_model_call` | 调用 `ctx.retrieve(query, scope, k=retrieval_k)`，把 `[Relevant Context]` 块拼到 `system_message` |
 | `after_model` / `aafter_model` | 当 `auto_store=True` 时，将最新一轮 `Q: ... / A: ...` 通过 `ctx.add()` 写入（跳过中间工具调用轮） |
-| `wrap_tool_call` / `awrap_tool_call` | 记录每次工具调用（名称、参数、结果、对应 AIMessage 推理内容、用户原始 task），`source_type=trace_extraction` |
+| `wrap_tool_call` / `awrap_tool_call` | 当 `record_tool_calls=True`（默认 `False`）时，记录每次工具调用（名称、参数、结果、对应 AIMessage 推理内容、用户原始 task），`source_type=trace_extraction`。工具参数覆盖不受此开关影响，始终生效 |
 | `after_agent` / `aafter_agent` | 当 `auto_compact=True` 时按 scope 计数，每 `compact_every` 次 Agent 运行向单线程池提交一次 `ctx.compact()` |
 
 ## 构造参数
@@ -68,6 +68,7 @@ Middleware 会基于传入的 `model` 与 `embedder` 自动构建一个 `Context
 | `embedder` | `Embeddings \| None` | `None` | 用于向量召回的 Embedding 模型 |
 | `retrieval_k` | `int` | `10` | 每次模型调用前检索的条目数 |
 | `auto_store` | `bool` | `True` | Agent 每轮回复后落库 Q&A |
+| `record_tool_calls` | `bool` | `False` | 是否落库每次工具调用。独立于 `auto_store`；默认关闭，因为每条记录都会触发一次额外的 `ctx.add()`（summarizer + embed + 写库） |
 | `auto_compact` | `bool` | `False` | 启用后台周期性 compact |
 | `compact_every` | `int` | `20` | 每 N 次 Agent 运行触发一次 `compact()`（按 scope 计数） |
 | `scope` | `str \| None` | `None` | 固定 scope。`None` 时使用 `runtime.thread_id` 做 per-session 隔离 |
@@ -95,6 +96,28 @@ middleware.shutdown(wait=True)
 ```
 
 `shutdown()` 幂等，停止接受新任务；传 `wait=False` 可以放弃在途任务。
+
+## 可观测性（LangSmith 追踪）
+
+LangChain 在 `LANGSMITH_TRACING=true` 时只会自动追踪**模型调用本身**，而 middleware 在模型前后做的「内置函数」对 LangSmith 不可见。为此 middleware 用 `@traceable` 包装了它直接调用的三个 ContextSeek 操作，让它们各自成为一个带输入/输出的 span：
+
+| Span | run_type | 对应钩子 | 内含 |
+|---|---|---|---|
+| `ContextSeek.retrieve` | `retriever` | `wrap_model_call` | 召回 + RRF 融合 + 去重 + 可选 LLM 重排 |
+| `ContextSeek.add` | `tool` | `after_model` / `wrap_tool_call` | summarizer（L0/L1）+ 向量化 + 冲突检测 + 写库 |
+| `ContextSeek.compact` | `chain` | `after_agent` | 演进（抽取 → 收敛合并 → 蒸馏 → 归档） |
+
+启用追踪：
+
+```bash
+export LANGSMITH_TRACING=true
+export LANGSMITH_API_KEY=ls__...
+export LANGSMITH_PROJECT=contextseek   # 可选，默认进 default 项目
+```
+
+启用后在 LangSmith UI 里，这三个 span 会和 LangChain 自带的模型调用一起出现在同一棵 trace 树下，可直接查看每一步的输入与输出。
+
+`langsmith` 已包含在 `contextseek[langchain]` 中。若未安装 `langsmith`，`@traceable` 会自动退化为直通装饰器（no-op），行为零变化、无额外开销；不设 `LANGSMITH_TRACING` 时也不会有任何上报。
 
 ## 相关
 

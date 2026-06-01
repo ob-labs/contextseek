@@ -54,6 +54,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
+from contextseek.bridges.langchain._tracing import traceable
 from contextseek.client.contextseek import ContextSeek
 
 if TYPE_CHECKING:
@@ -75,7 +76,8 @@ class ContextSeekMiddleware(
 
     - ``wrap_model_call``: retrieve relevant context and append it to ``system_message``
     - ``after_model``: persist the latest assistant turn to ContextSeek
-    - ``wrap_tool_call``: persist tool invocations (with rationale + task) for provenance
+    - ``wrap_tool_call``: persist tool invocations (with rationale + task) for
+      provenance — gated by ``record_tool_calls`` (default ``False``)
     - ``before_agent``: lazily resolve ``scope`` from ``runtime.thread_id``
     - ``after_agent``: throttled fire-and-forget ``ctx.compact()`` for evolution
     """
@@ -88,8 +90,10 @@ class ContextSeekMiddleware(
         embedder: Embeddings | None = None,
         retrieval_k: int = 10,
         retrieval_tags: list[str] | None = None,
+        min_score: float | None = None,
         tool_arg_overrides: dict[str, dict[str, Any]] | None = None,
         auto_store: bool = True,
+        record_tool_calls: bool = False,
         auto_compact: bool = False,
         compact_every: int = 20,
         scope: str | None = None,
@@ -97,8 +101,16 @@ class ContextSeekMiddleware(
         super().__init__()
         self.retrieval_k = retrieval_k
         self.retrieval_tags = list(retrieval_tags) if retrieval_tags else None
+        self.min_score = min_score
         self.tool_arg_overrides = tool_arg_overrides or {}
         self.auto_store = auto_store
+        # Whether wrap_tool_call persists each tool invocation to ContextSeek.
+        # Independent of ``auto_store`` (which gates agent-response storage).
+        # Tool calls fire far more often than final answers, and each recorded
+        # call triggers an extra ctx.add() -> summarizer (L0/L1) + embed + DB
+        # write. Defaults to ``False`` to avoid that volume; set ``True`` when
+        # per-tool provenance is needed.
+        self.record_tool_calls = record_tool_calls
         self.auto_compact = auto_compact
         self.compact_every = compact_every
         # Instance-level fallback scope. Real per-session scope lives in
@@ -207,6 +219,28 @@ class ContextSeekMiddleware(
                 pass
         return 1536
 
+    # ── traced ctx wrappers ───────────────────────────────
+    # Thin pass-throughs around the three ContextSeek calls the middleware
+    # makes, decorated with ``@traceable`` so each shows up as a span (with
+    # inputs/outputs) in LangSmith when ``LANGSMITH_TRACING=true``. Without
+    # langsmith installed, ``traceable`` is a no-op (see ``_tracing``).
+    #
+    # Only forward plain-data args (query / content / scope / tags …) so the
+    # captured inputs stay JSON-clean — ``self`` and other heavy objects are
+    # not threaded through.
+
+    @traceable(run_type="retriever", name="ContextSeek.retrieve")
+    def _traced_retrieve(self, query: str, **kwargs: Any) -> Any:
+        return self.ctx.retrieve(query, **kwargs)
+
+    @traceable(run_type="tool", name="ContextSeek.add")
+    def _traced_add(self, **kwargs: Any) -> Any:
+        return self.ctx.add(**kwargs)
+
+    @traceable(run_type="chain", name="ContextSeek.compact")
+    def _traced_compact(self, *, scope: str, dry_run: bool = False) -> Any:
+        return self.ctx.compact(scope=scope, dry_run=dry_run)
+
     # ── scope ─────────────────────────────────────────────
 
     def _current_scope(self) -> str:
@@ -244,11 +278,12 @@ class ContextSeekMiddleware(
         if not query:
             return handler(request)
         try:
-            response = self.ctx.retrieve(
+            response = self._traced_retrieve(
                 query,
                 scope=self._current_scope(),
                 k=self.retrieval_k,
                 tags=self.retrieval_tags,
+                min_score=self.min_score,
             )
         except Exception:
             return handler(request)
@@ -270,11 +305,13 @@ class ContextSeekMiddleware(
         if not query:
             return await handler(request)
         try:
-            response = self.ctx.retrieve(
+            response = await asyncio.to_thread(
+                self._traced_retrieve,
                 query,
                 scope=self._current_scope(),
                 k=self.retrieval_k,
                 tags=self.retrieval_tags,
+                min_score=self.min_score,
             )
         except Exception:
             return await handler(request)
@@ -316,7 +353,7 @@ class ContextSeekMiddleware(
             # Store the Q+A pair so the Summarizer inside ctx.add() has full
             # context to produce a tight abstract (L0) and overview (L1).
             # Distillation is the Summarizer's job, not the middleware's.
-            self.ctx.add(
+            self._traced_add(
                 content=f"Q: {last_user}\nA: {ai_text}",
                 scope=self._current_scope(),
                 source="agent_response",
@@ -342,7 +379,11 @@ class ContextSeekMiddleware(
     @override
     def wrap_tool_call(self, request: Any, handler: Callable[..., Any]) -> Any:
         tool_name, tool_args, tool_call_id = self._extract_tool_call_fields(request)
+        # Apply arg overrides regardless of record_tool_calls — they affect
+        # tool *execution*, not recording.
         tool_args = self._apply_tool_arg_overrides(request, tool_name, tool_args)
+        if not self.record_tool_calls:
+            return handler(request)
         messages = self._messages_from_request(request)
         rationale = self._reasoning_for_tool_call(messages, tool_call_id)
         task = self._last_user_text(messages)
@@ -364,7 +405,11 @@ class ContextSeekMiddleware(
         # Read state BEFORE awaiting handler — by the time we resume, the
         # state may have advanced beyond this tool call.
         tool_name, tool_args, tool_call_id = self._extract_tool_call_fields(request)
+        # Apply arg overrides regardless of record_tool_calls — they affect
+        # tool *execution*, not recording.
         tool_args = self._apply_tool_arg_overrides(request, tool_name, tool_args)
+        if not self.record_tool_calls:
+            return await handler(request)
         messages = self._messages_from_request(request)
         rationale = self._reasoning_for_tool_call(messages, tool_call_id)
         task = self._last_user_text(messages)
@@ -394,7 +439,7 @@ class ContextSeekMiddleware(
             from contextseek.domain.provenance import SourceType
 
             result_text = self._stringify_tool_result(result)
-            self.ctx.add(
+            self._traced_add(
                 content={
                     "tool": tool_name,
                     "args": tool_args,
@@ -502,7 +547,7 @@ class ContextSeekMiddleware(
 
         def _run() -> None:
             try:
-                self.ctx.compact(scope=scope, dry_run=False)
+                self._traced_compact(scope=scope, dry_run=False)
             except Exception:
                 pass
             finally:

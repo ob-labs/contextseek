@@ -160,10 +160,16 @@ class ConvergenceMerger:
             )
             kept.append(merged)
 
-            # Archive source items
+            # Mark provenance on the source items, but DO NOT hide them from
+            # retrieval. The merged knowledge is a coarser-grained synthesis;
+            # the original extracted items still carry independently useful
+            # mid-grained detail (own embeddings, tags, geo, ...) and should
+            # remain searchable. Only ``raw → extracted`` consumption flips
+            # ``searchable`` (see EvolutionEngine), which preserves the
+            # "raw was absorbed" semantics without collapsing extracted into
+            # invisible artefacts when a higher-stage convergence happens.
             for it in cluster:
                 it.superseded_by = merged.id
-                it.searchable = False
                 it.updated_at = _utc_now()
                 archived.append(it)
 

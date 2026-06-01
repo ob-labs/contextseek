@@ -23,6 +23,51 @@ from contextseek.domain.provenance import SourceType
 
 
 # ---------------------------------------------------------------------------
+# _tracing shim — @traceable graceful degradation
+# ---------------------------------------------------------------------------
+
+
+class TestTraceableShim:
+    """The ``traceable`` decorator must preserve function behavior whether or
+    not langsmith is installed, in both bare and parametrized forms."""
+
+    def test_bare_decorator_preserves_behavior(self) -> None:
+        from contextseek.bridges.langchain._tracing import traceable
+
+        @traceable
+        def add(a, b):
+            return a + b
+
+        assert add(2, 3) == 5
+
+    def test_parametrized_decorator_preserves_behavior(self) -> None:
+        from contextseek.bridges.langchain._tracing import traceable
+
+        @traceable(run_type="retriever", name="X")
+        def mul(a, b):
+            return a * b
+
+        assert mul(2, 3) == 6
+
+    def test_noop_fallback_when_langsmith_absent(self, monkeypatch) -> None:
+        """Force the langsmith-absent branch: ``traceable`` returns the
+        undecorated function unchanged in both calling forms."""
+        import contextseek.bridges.langchain._tracing as tracing
+
+        monkeypatch.setattr(tracing, "_HAS_LANGSMITH", False)
+
+        def fn(x):
+            return x + 1
+
+        # Bare form returns the same function object (identity passthrough).
+        assert tracing.traceable(fn) is fn
+        # Parametrized form returns a decorator that is an identity passthrough.
+        decorated = tracing.traceable(run_type="tool", name="Y")(fn)
+        assert decorated is fn
+        assert decorated(41) == 42
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -36,8 +81,18 @@ def _fake_ctx() -> MagicMock:
     return ctx
 
 
-def _hit(summary: str = "", abstract: str = "") -> SimpleNamespace:
-    return SimpleNamespace(item=SimpleNamespace(summary=summary, abstract=abstract))
+def _hit(
+    summary: str = "", abstract: str = "", item_id: str | None = None
+) -> SimpleNamespace:
+    import uuid
+
+    return SimpleNamespace(
+        item=SimpleNamespace(
+            summary=summary,
+            abstract=abstract,
+            id=item_id or uuid.uuid4().hex,
+        )
+    )
 
 
 def _retrieve_response(*hits: SimpleNamespace) -> SimpleNamespace:
@@ -198,9 +253,14 @@ class TestWrapModelCall:
         result = mw.wrap_model_call(request, handler)
 
         assert result == "response"
-        ctx.retrieve.assert_called_once_with("What is OB?", scope="s", k=3)
+        ctx.retrieve.assert_called_once_with(
+            "What is OB?", scope="s", k=3, tags=None, min_score=None
+        )
         assert isinstance(captured["sys"], SystemMessage)
-        assert "[Relevant Context]" in captured["sys"].content
+        assert (
+            "[Relevant Context - Prior Session Policy Lessons]"
+            in captured["sys"].content
+        )
         assert "OB is fast" in captured["sys"].content
         assert "vector + fts" in captured["sys"].content
         assert "You are helpful." in captured["sys"].content
@@ -308,7 +368,7 @@ class TestWrapToolCall:
 
     def test_records_tool_message_as_string(self) -> None:
         ctx = _fake_ctx()
-        mw = ContextSeekMiddleware(ctx=ctx, scope="s")
+        mw = ContextSeekMiddleware(ctx=ctx, scope="s", record_tool_calls=True)
         request = self._request()
         tool_msg = ToolMessage(content="OB is a database", tool_call_id="tc-1")
         handler = MagicMock(return_value=tool_msg)
@@ -331,7 +391,7 @@ class TestWrapToolCall:
 
     def test_handler_returning_plain_string(self) -> None:
         ctx = _fake_ctx()
-        mw = ContextSeekMiddleware(ctx=ctx, scope="s")
+        mw = ContextSeekMiddleware(ctx=ctx, scope="s", record_tool_calls=True)
         request = self._request()
         handler = MagicMock(return_value="plain string result")
 
@@ -343,7 +403,7 @@ class TestWrapToolCall:
 
     def test_rationale_none_when_no_matching_tool_call(self) -> None:
         ctx = _fake_ctx()
-        mw = ContextSeekMiddleware(ctx=ctx, scope="s")
+        mw = ContextSeekMiddleware(ctx=ctx, scope="s", record_tool_calls=True)
         # AIMessage has no tool_calls matching id
         messages = [
             HumanMessage(content="task"),
@@ -359,7 +419,7 @@ class TestWrapToolCall:
     def test_storage_failure_does_not_break_tool(self) -> None:
         ctx = _fake_ctx()
         ctx.add.side_effect = RuntimeError("oops")
-        mw = ContextSeekMiddleware(ctx=ctx, scope="s")
+        mw = ContextSeekMiddleware(ctx=ctx, scope="s", record_tool_calls=True)
         request = self._request()
         handler = MagicMock(return_value="ok")
 
@@ -367,6 +427,39 @@ class TestWrapToolCall:
         result = mw.wrap_tool_call(request, handler)
 
         assert result == "ok"
+
+    def test_default_does_not_record_tool_call(self) -> None:
+        # Default record_tool_calls=False: tool runs, result returned, no add().
+        ctx = _fake_ctx()
+        mw = ContextSeekMiddleware(ctx=ctx, scope="s")
+        request = self._request()
+        tool_msg = ToolMessage(content="OB is a database", tool_call_id="tc-1")
+        handler = MagicMock(return_value=tool_msg)
+
+        result = mw.wrap_tool_call(request, handler)
+
+        assert result is tool_msg
+        handler.assert_called_once_with(request)
+        ctx.add.assert_not_called()
+
+    def test_arg_overrides_apply_even_when_not_recording(self) -> None:
+        # Arg overrides affect tool *execution* and must still apply with the
+        # default record_tool_calls=False.
+        ctx = _fake_ctx()
+        mw = ContextSeekMiddleware(
+            ctx=ctx,
+            scope="s",
+            tool_arg_overrides={"search": {"q": "FORCED"}},
+        )
+        request = self._request()
+        handler = MagicMock(return_value="ok")
+
+        result = mw.wrap_tool_call(request, handler)
+
+        assert result == "ok"
+        ctx.add.assert_not_called()
+        # Override merged into the request's tool_call args before execution.
+        assert request.tool_call["args"]["q"] == "FORCED"
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +743,7 @@ class TestAsyncWrappers:
 
     def test_awrap_tool_call_offloads_record(self) -> None:
         ctx = _fake_ctx()
-        mw = ContextSeekMiddleware(ctx=ctx, scope="s")
+        mw = ContextSeekMiddleware(ctx=ctx, scope="s", record_tool_calls=True)
 
         request = SimpleNamespace(
             tool=SimpleNamespace(name="search"),

@@ -39,7 +39,7 @@ Issues = "https://github.com/ob-labs/contextseek/issues"
 [project.optional-dependencies]
 test = ["pytest>=8.2.0"]
 http = ["fastapi>=0.110.0", "uvicorn>=0.30.0", "pydantic>=2.7.0"]
-langchain = ["langchain-core>=0.3.0", "langchain>=0.3.0", "langgraph>=0.2.0"]
+langchain = ["langchain-core>=0.3.0", "langchain>=0.3.0", "langgraph>=0.2.0", "langsmith>=0.1.0"]
 openai = ["langchain-openai>=0.3.0"]
 ollama = ["langchain-ollama>=0.3.0"]
 huggingface = ["langchain-huggingface>=0.1.0"]
