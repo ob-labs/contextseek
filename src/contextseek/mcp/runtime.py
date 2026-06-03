@@ -5,7 +5,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -129,9 +132,53 @@ def _error_response(
     }
 
 
+_DEFAULT_DAEMON_MCP_BASE = "http://127.0.0.1:2882"
+
+
+def _daemon_mcp_base() -> str:
+    """Base URL of the daemon's HTTP MCP endpoint (override via env)."""
+    return os.environ.get("CONTEXTSEEK_MCP_HTTP", _DEFAULT_DAEMON_MCP_BASE).rstrip("/")
+
+
+def _daemon_available(base: str, timeout: float = 1.0) -> bool:
+    """Return True when the daemon's HTTP MCP server answers on ``/health``."""
+    try:
+        with urllib.request.urlopen(base + "/health", timeout=timeout) as resp:
+            return 200 <= getattr(resp, "status", 200) < 300
+    except (urllib.error.URLError, OSError, ValueError):
+        return False
+
+
+def _post_message(
+    base: str, request: dict[str, Any], timeout: float = 30.0
+) -> dict[str, Any]:
+    """Forward one JSON-RPC request to the daemon's ``/message`` endpoint."""
+    data = json.dumps(request, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        base + "/message",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
 def run_stdio_server() -> int:
-    """Run line-delimited JSON-RPC server over stdio."""
-    runtime = MCPRuntime(server=ContextSeekMCPServer.with_default_client())
+    """Run a line-delimited JSON-RPC server over stdio.
+
+    When the background daemon's HTTP MCP server is reachable, this acts as a
+    thin stdio↔HTTP bridge so all requests hit the daemon's single shared
+    storage instance — avoiding a second embedded-DB connection on the same
+    path.  When no daemon is running it falls back to an in-process server so
+    the command still works standalone.
+    """
+    base = _daemon_mcp_base()
+    use_bridge = _daemon_available(base)
+    runtime: MCPRuntime | None = None
+    if not use_bridge:
+        runtime = MCPRuntime(server=ContextSeekMCPServer.with_default_client())
+
     for line in sys.stdin:
         raw = line.strip()
         if not raw:
@@ -145,7 +192,21 @@ def run_stdio_server() -> int:
             sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
             sys.stdout.flush()
             continue
-        response = runtime.handle_request(request)
+
+        if use_bridge:
+            try:
+                response = _post_message(base, request)
+            except (urllib.error.URLError, OSError, ValueError):
+                # Daemon went away mid-session — degrade to in-process handling.
+                use_bridge = False
+                if runtime is None:
+                    runtime = MCPRuntime(
+                        server=ContextSeekMCPServer.with_default_client()
+                    )
+                response = runtime.handle_request(request)
+        else:
+            response = runtime.handle_request(request)
+
         sys.stdout.write(json.dumps(response, ensure_ascii=False) + "\n")
         sys.stdout.flush()
     return 0

@@ -35,7 +35,7 @@ class HeuristicExtractor:
 
     def extract(self, item: ContextItem) -> list[ContextItem]:
         if not isinstance(item.content, dict):
-            return []
+            return self._extract_text(item)
 
         content = item.content
         results: list[ContextItem] = []
@@ -74,6 +74,18 @@ class HeuristicExtractor:
 
         return results
 
+    def _extract_text(self, item: ContextItem) -> list[ContextItem]:
+        """Extract a plain-text item into a single extracted insight.
+
+        Uses the first 200 characters as the insight body when no LLM is
+        available, giving the convergence merger something to cluster on.
+        """
+        text = item.content_text.strip()
+        if not text:
+            return []
+        summary = text[:200]
+        return [self._make_insight(item, summary, "text_extracted")]
+
     def _make_insight(self, source: ContextItem, text: str, tag: str) -> ContextItem:
         return ContextItem(
             id=_generate_id(),
@@ -103,9 +115,43 @@ class LLMExtractor:
         self._summarize = summarize_fn
         self._fallback = HeuristicExtractor(mode="summary")
 
+    def _extract_text(self, item: ContextItem) -> list[ContextItem]:
+        """Summarize a plain-text item into a single extracted insight.
+
+        Falls back to the heuristic text extractor when the LLM call fails so
+        that text items still progress past ``raw`` when an LLM is configured.
+        """
+        text = item.content_text.strip()
+        if not text:
+            return []
+        try:
+            summary = self._summarize(text).strip()
+        except Exception:
+            return self._fallback.extract(item)
+        if not summary:
+            summary = text[:200]
+        return [
+            ContextItem(
+                id=_generate_id(),
+                content=summary,
+                scope=item.scope,
+                provenance=Provenance(
+                    source_type=SourceType.trace_extraction,
+                    source_id=item.id,
+                    confidence=0.7,
+                    context="LLM-summarized text insight",
+                ),
+                stage=Stage.extracted,
+                stability=Stability.transient,
+                tags=["llm_summary", "text_extracted", "auto_extracted"],
+                links=[Link(target_id=item.id, relation=LinkType.derived_from)],
+                created_at=_utc_now(),
+            )
+        ]
+
     def extract(self, item: ContextItem) -> list[ContextItem]:
         if not isinstance(item.content, dict):
-            return []
+            return self._extract_text(item)
 
         content = item.content
         # Build text for LLM

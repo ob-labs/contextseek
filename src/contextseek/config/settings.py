@@ -2,13 +2,17 @@
 
 Loads configuration from environment variables (per-section ``env_prefix``
 such as ``STORAGE_`` so ``backend`` becomes ``STORAGE_BACKEND``) and from a
-``.env``
-file resolved like PowerMem: current working directory, repository root,
-``examples/configs/.env``, then optional ``python-dotenv`` search.
+config file resolved in priority order:
+
+1. ``CONTEXTSEEK_CONFIG`` env var (explicit override)
+2. ``.env`` in CWD / project root / ``examples/configs/`` (SDK / developer workflow)
+3. ``~/.contextseek/config.env`` (personal install, created by ``contextseek init``)
+4. ``python-dotenv`` search
 
 Environment keys are matched case-insensitively.  Zero-config defaults yield
 an in-memory store with keyword-only retrieval — no LLM or embedding model
-required.
+required.  Personal installs (after ``contextseek init``) default to the
+embedded seekdb backend.
 
 Usage::
 
@@ -44,7 +48,24 @@ from contextseek.llm.prompts import DEFAULT_LLM_PROMPTS
 
 
 def _get_default_env_file() -> str | None:
-    """Pick a ``.env`` path using the same resolution order as PowerMem."""
+    """Pick a config file path in priority order:
+
+    1. ``CONTEXTSEEK_CONFIG`` env var (explicit override)
+    2. ``.env`` in CWD / project root / examples (SDK / developer workflow)
+    3. ``~/.contextseek/config.env`` (personal install, created by ``contextseek init``)
+    4. ``python-dotenv`` search as last resort
+
+    Project-level config (2) takes precedence over personal config (3) so that
+    SDK users building applications are not affected by a local ``contextseek init``.
+    """
+    import os
+
+    explicit = os.environ.get("CONTEXTSEEK_CONFIG", "").strip()
+    if explicit:
+        p = Path(explicit).expanduser()
+        if p.is_file():
+            return str(p)
+
     project_root = Path(__file__).resolve().parents[3]
     candidates = (
         Path.cwd() / ".env",
@@ -54,6 +75,11 @@ def _get_default_env_file() -> str | None:
     for path in candidates:
         if path.is_file():
             return str(path)
+
+    personal = Path.home() / ".contextseek" / "config.env"
+    if personal.is_file():
+        return str(personal)
+
     try:
         from dotenv import find_dotenv
 
@@ -108,7 +134,8 @@ class StorageSettings(BaseSettings):
     model_config = nested_section_config("STORAGE_")
 
     backend: str = "memory"
-    """Backend type: "memory" or "file"."""
+    """Backend type: "memory", "file", "seekdb", or "oceanbase".
+    Personal installs default to "seekdb" via ~/.contextseek/config.env."""
 
     path: str = ".contextseek/store"
     """Root path for file-based backend."""
@@ -121,6 +148,24 @@ class StorageSettings(BaseSettings):
 
     cold_path: str = ".contextseek/cold"
     """Root path for cold-tier file backend."""
+
+
+class SeekDBSettings(BaseSettings):
+    """SeekDB storage backend configuration (embedded or server mode)."""
+
+    model_config = nested_section_config("SEEKDB_")
+
+    path: str = "~/.contextseek/seekdb.db"
+    """Local path for embedded mode. Ignored when host is set."""
+
+    host: str = ""
+    """Remote seekdb server host. Empty string = embedded (local) mode."""
+
+    port: int = 2881
+    """Remote seekdb server port."""
+
+    database: str = "contextseek"
+    """Database name inside seekdb."""
 
 
 class OceanBaseSettings(BaseSettings):
@@ -245,6 +290,15 @@ class EvolutionSettings(BaseSettings):
     llm_stage_infer_enabled: bool = False
     llm_distill_enabled: bool = False
     llm_feedback_enabled: bool = False
+    # LLM-free evolution: plain text items
+    text_extract_min_access: int = 3
+    """Minimum access_count before a plain-text raw item is eligible for extraction."""
+    heuristic_distill_min_use: int = 5
+    """Heuristic skill distillation threshold (lower than LLM path default of 10)."""
+    heuristic_distill_min_age_days: float = 3.0
+    """Minimum item age in days before heuristic distillation."""
+    heuristic_distill_min_boost: float = 1.1
+    """Minimum relevance_boost for heuristic skill distillation."""
 
 
 class DreamSettings(BaseSettings):
@@ -373,6 +427,7 @@ class ContextSeekSettings(BaseSettings):
     model_config = settings_config()
 
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    seekdb: SeekDBSettings = Field(default_factory=SeekDBSettings)
     ob: OceanBaseSettings = Field(default_factory=OceanBaseSettings)
     geo: GeoSettings = Field(default_factory=GeoSettings)
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
@@ -388,6 +443,17 @@ class ContextSeekSettings(BaseSettings):
     scope_lint: bool = Field(
         default=False,
         description="Emit ScopeLintWarning when scope strings look malformed.",
+    )
+    default_scope: str = Field(
+        default="",
+        description="Default scope used by CLI commands when --scope is omitted. "
+        "Set via DEFAULT_SCOPE env var or config.env.",
+    )
+    skill_export_dir: str = Field(
+        default="",
+        description="Directory for materialized SKILL.md exports. "
+        "Set via SKILL_EXPORT_DIR env var or config.env; "
+        "empty falls back to ~/.contextseek/skills.",
     )
 
 
@@ -441,6 +507,10 @@ def to_strategy_config(settings: ContextSeekSettings) -> "StrategyConfig":
             distill_min_relevance_boost=settings.evolution.distill_min_relevance_boost,
             ephemeral_ttl_seconds=settings.evolution.ephemeral_ttl_seconds,
             llm_merge_enabled=settings.evolution.llm_merge_enabled,
+            text_extract_min_access=settings.evolution.text_extract_min_access,
+            heuristic_distill_min_use=settings.evolution.heuristic_distill_min_use,
+            heuristic_distill_min_age_days=settings.evolution.heuristic_distill_min_age_days,
+            heuristic_distill_min_boost=settings.evolution.heuristic_distill_min_boost,
         ),
         dream=DreamStrategy(
             llm_enabled=settings.dream.llm_enabled,
@@ -471,6 +541,7 @@ __all__ = [
     "EmbeddingSettings",
     "GeoSettings",
     "OceanBaseSettings",
+    "SeekDBSettings",
     "EvolutionSettings",
     "LLMSettings",
     "LifecycleSettings",

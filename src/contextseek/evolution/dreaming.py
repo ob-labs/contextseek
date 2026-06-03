@@ -151,7 +151,51 @@ class ConsolidationEngine:
         if not clusters:
             return ConsolidationResult()
 
-        # Generate pattern items (capped by max_outputs)
+        return self._consolidate_clusters(clusters)
+
+    def consolidate_pairs(
+        self, pairs: list[tuple[ContextItem, ContextItem]]
+    ) -> ConsolidationResult:
+        """Consolidate explicit item pairs (e.g. from :func:`pick_dream_targets`).
+
+        Pairs sharing an item are unioned into a single cluster so that a
+        transitively-related group produces one pattern item instead of several.
+        """
+        if not pairs:
+            return ConsolidationResult()
+
+        # Union-find over the items referenced by the pairs.
+        parent: dict[str, str] = {}
+        items_by_id: dict[str, ContextItem] = {}
+
+        def _find(x: str) -> str:
+            parent.setdefault(x, x)
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def _union(x: str, y: str) -> None:
+            parent[_find(x)] = _find(y)
+
+        for a, b in pairs:
+            items_by_id[a.id] = a
+            items_by_id[b.id] = b
+            _union(a.id, b.id)
+
+        groups: dict[str, list[ContextItem]] = {}
+        for item_id, item in items_by_id.items():
+            groups.setdefault(_find(item_id), []).append(item)
+
+        clusters = [g for g in groups.values() if len(g) >= 2]
+        if not clusters:
+            return ConsolidationResult()
+        return self._consolidate_clusters(clusters)
+
+    def _consolidate_clusters(
+        self, clusters: list[list[ContextItem]]
+    ) -> ConsolidationResult:
+        """Produce consolidation pattern items from pre-selected clusters."""
         result = ConsolidationResult()
         for cluster in clusters[: self._strategy.consolidation_max_outputs]:
             pattern_item = self._extract_pattern(cluster)
@@ -392,11 +436,22 @@ class DreamEngine:
     def last_dream_time(self) -> datetime | None:
         return self._last_dream_time
 
-    def dream(self, items: list[ContextItem]) -> DreamReport:
+    def dream(
+        self,
+        items: list[ContextItem],
+        *,
+        targets: "DreamTargets | None" = None,
+    ) -> DreamReport:
         """Execute one full dream cycle.
 
         Checks preconditions (cooldown, minimum items) then runs
         consolidation and optionally divergence.
+
+        When *targets* is provided (typically from :func:`pick_dream_targets`,
+        seeded by lint's consolidation hints), the cycle is goal-directed:
+        consolidation operates on the targeted item pairs and divergence
+        cross-pollinates the targeted high-access items, instead of relying
+        purely on time-window selection.
 
         Returns:
             DreamReport with all generated items and statistics.
@@ -422,14 +477,28 @@ class DreamEngine:
                 total_dream_items=0,
             )
 
+        has_targets = targets is not None and (
+            targets.consolidation_pairs or targets.divergence_candidates
+        )
+
         # Phase 1: Consolidation
-        consolidation_result = self._consolidation.consolidate(active_items)
+        if has_targets and targets.consolidation_pairs:
+            consolidation_result = self._consolidation.consolidate_pairs(
+                targets.consolidation_pairs
+            )
+        else:
+            consolidation_result = self._consolidation.consolidate(active_items)
 
         # Phase 2: Divergence (if enabled and enough clusters)
         divergence_result: DivergenceResult | None = None
         if self._strategy.divergence_enabled:
-            # Build clusters from consolidation or tag-based fallback
-            clusters = self._build_clusters_for_divergence(active_items)
+            if has_targets and targets.divergence_candidates:
+                # Treat each targeted item as its own cluster so the divergence
+                # engine cross-pollinates exactly the items lint/graph selected.
+                clusters = [[c] for c in targets.divergence_candidates]
+            else:
+                # Build clusters from consolidation or tag-based fallback
+                clusters = self._build_clusters_for_divergence(active_items)
             if len(clusters) >= self._strategy.divergence_min_clusters:
                 divergence_result = self._divergence.diverge(clusters)
 
@@ -473,6 +542,109 @@ class DreamEngine:
         return [group for group in tag_groups.values() if len(group) >= 2]
 
 
+# ═══════════════════════════════════════════
+# Graph-structure-driven target selection
+# ═══════════════════════════════════════════
+
+
+@dataclass
+class DreamTargets:
+    """Pre-computed targets for a dream cycle, produced by :func:`pick_dream_targets`.
+
+    Passing targets to :meth:`DreamEngine.dream` lets lint results steer which
+    items get consolidated or explored, instead of purely time-window selection.
+    """
+
+    consolidation_pairs: list[tuple[ContextItem, ContextItem]] = field(
+        default_factory=list
+    )
+    """Pairs of knowledge items that are semantically close enough to merge."""
+
+    divergence_candidates: list[ContextItem] = field(default_factory=list)
+    """High-access items that lack an abstract — good targets for exploration."""
+
+
+def pick_dream_targets(
+    items: list[ContextItem],
+    *,
+    consolidation_sim_threshold: float = 0.88,
+    divergence_min_access: int = 5,
+    max_consolidation_pairs: int = 3,
+    max_divergence_candidates: int = 2,
+    consolidation_hints: "list | None" = None,
+) -> DreamTargets:
+    """Select dream targets based on embedding similarity and access patterns.
+
+    No graph database required: uses cosine similarity over existing embeddings
+    (or Jaccard token overlap as fallback).  Results are deterministic given the
+    same item list.
+
+    Args:
+        items: All active items in the scope.
+        consolidation_sim_threshold: Cosine similarity above which two knowledge
+            items are candidates for merging.
+        divergence_min_access: Minimum access_count for divergence candidates.
+        max_consolidation_pairs: Cap on consolidation pairs returned.
+        max_divergence_candidates: Cap on divergence candidates returned.
+        consolidation_hints: Optional pre-computed ConsolidationHint list from
+            :func:`run_lint` — avoids recomputing similarities when lint already ran.
+
+    Returns:
+        DreamTargets with populated consolidation_pairs and divergence_candidates.
+    """
+    targets = DreamTargets()
+    active = [it for it in items if not it.is_deleted and it.searchable]
+
+    # ── Consolidation: pick from lint hints when available ───────────────────
+    if consolidation_hints:
+        id_map = {it.id: it for it in active}
+        seen: set[frozenset[str]] = set()
+        for hint in consolidation_hints:
+            if len(targets.consolidation_pairs) >= max_consolidation_pairs:
+                break
+            pair_key = frozenset({hint.item_a_id, hint.item_b_id})
+            if pair_key in seen:
+                continue
+            a = id_map.get(hint.item_a_id)
+            b = id_map.get(hint.item_b_id)
+            if a and b:
+                targets.consolidation_pairs.append((a, b))
+                seen.add(pair_key)
+    else:
+        # Fallback: brute-force similarity scan over knowledge items
+        knowledge = [it for it in active if it.stage.value == "knowledge"]
+        seen = set()
+        for i, a in enumerate(knowledge):
+            if len(targets.consolidation_pairs) >= max_consolidation_pairs:
+                break
+            for b in knowledge[i + 1 :]:
+                pair_key = frozenset({a.id, b.id})
+                if pair_key in seen:
+                    continue
+                sim = (
+                    _cosine_similarity(a.embedding, b.embedding)
+                    if a.embedding and b.embedding
+                    else _token_similarity(a.content_text, b.content_text)
+                )
+                if sim >= consolidation_sim_threshold:
+                    targets.consolidation_pairs.append((a, b))
+                    seen.add(pair_key)
+                    if len(targets.consolidation_pairs) >= max_consolidation_pairs:
+                        break
+
+    # ── Divergence: high-access items lacking abstraction ───────────────────
+    divergence_pool = [
+        it
+        for it in active
+        if it.access_count >= divergence_min_access and not it.abstract
+    ]
+    # Sort by access count descending for most impactful selection
+    divergence_pool.sort(key=lambda it: it.access_count, reverse=True)
+    targets.divergence_candidates = divergence_pool[:max_divergence_candidates]
+
+    return targets
+
+
 __all__ = [
     "ConsolidationEngine",
     "ConsolidationResult",
@@ -480,4 +652,6 @@ __all__ = [
     "DivergenceResult",
     "DreamEngine",
     "DreamReport",
+    "DreamTargets",
+    "pick_dream_targets",
 ]

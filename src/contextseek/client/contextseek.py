@@ -129,6 +129,54 @@ def _auto_build_summarizer() -> Any | None:
     return build_summarizer(SummarizerSettings())
 
 
+def _resolve_seekdb_backend(adapter: Any) -> Any | None:
+    """Return the SeekDBBackend behind *adapter*, or ``None``."""
+    try:
+        from contextseek.storage.seekdb_backend import SeekDBBackend
+
+        router = adapter._vfs._router
+        _, route = router.resolve("contextseek://")
+        backend = route.get("backend") if isinstance(route, dict) else None
+        return backend if isinstance(backend, SeekDBBackend) else None
+    except Exception:
+        return None
+
+
+def _warn_on_embedding_dims_change(
+    adapter: Any, embedder: Any, *, configured_dims: int
+) -> None:
+    """Warn when the active embedding dimensionality differs from indexed data.
+
+    Vectors produced by a different model live in an incompatible space, so the
+    existing collection must be re-embedded after switching providers. The
+    current dimensionality is persisted in the seekdb meta table for the
+    comparison on the next startup.
+    """
+    backend = _resolve_seekdb_backend(adapter)
+    if backend is None:
+        return
+    try:
+        current = int(configured_dims) if configured_dims else 0
+        if not current:
+            probe = embedder("dimension probe")
+            current = len(probe) if probe else 0
+        if not current:
+            return
+        stored = backend.meta_get("embedding_dims")
+        if stored is not None and stored != str(current):
+            warnings.warn(
+                f"Embedding dimensionality changed ({stored} → {current}). "
+                "Existing vectors were produced by a different model and are no "
+                "longer comparable; reindex this scope (re-embed items) to "
+                "restore vector-search quality.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        backend.meta_set("embedding_dims", str(current))
+    except Exception:
+        pass
+
+
 def _build_adapter_from_settings(settings: Any) -> SeekVFSAdapter:
     """Build a VFS-backed storage adapter from ContextSeekSettings."""
     from seekvfs import VFS
@@ -175,6 +223,17 @@ def _build_adapter_from_settings(settings: Any) -> SeekVFSAdapter:
                 password=ob.password,
                 db_name=ob.db_name,
             )
+        backend.initialize()
+    elif storage.backend == "seekdb":
+        from contextseek.storage.seekdb_backend import SeekDBBackend
+
+        seekdb = settings.seekdb
+        backend = SeekDBBackend(
+            path=seekdb.path,
+            database=seekdb.database,
+            host=seekdb.host,
+            port=seekdb.port,
+        )
         backend.initialize()
     elif storage.backend == "file":
         backend = FileBackend(root_dir=storage.path)
@@ -1037,52 +1096,69 @@ class ContextSeek:
 
         return compute_chain_confidence(item, _resolver, max_depth=10)
 
-    def overview(self, *, scope: str) -> EvolutionReport:
-        """Read-only summary of items in a scope: stages and evolution-style counts.
+    _SCOPE_ITEM_BATCH = 500
 
-        Scans all items and categorises them by stage, identifying
-        candidates for extraction, convergence, and distillation.
-
-        Args:
-            scope: Scope to analyse.
-
-        Returns:
-            EvolutionReport with stage distribution and candidate counts.
-        """
+    def _load_scope_items(
+        self,
+        *,
+        scope: str,
+        stage: Stage | None = None,
+    ) -> list[ContextItem]:
+        """Load all items in a scope with batched reads when supported."""
         prefix = self.resolver.prefix_for(scope)
         refs = self.adapter.ls(prefix)
+        read_batch = getattr(self.adapter, "read_batch", None)
+        result: list[ContextItem] = []
 
+        def _append_from_payload(ref: str, payload: dict[str, Any] | None) -> None:
+            if payload is None:
+                return
+            try:
+                item = deserialize_context_item(payload)
+            except (KeyError, TypeError, ValueError):
+                return
+            if item.is_deleted:
+                return
+            if stage is not None and item.stage != stage:
+                return
+            result.append(item)
+
+        if read_batch is None:
+            for ref in refs:
+                _append_from_payload(ref, self.adapter.read(ref))
+        else:
+            for i in range(0, len(refs), self._SCOPE_ITEM_BATCH):
+                chunk = refs[i : i + self._SCOPE_ITEM_BATCH]
+                batch = read_batch(chunk)
+                for ref in chunk:
+                    _append_from_payload(ref, batch.get(ref))
+
+        result.sort(key=lambda x: x.created_at)
+        return result
+
+    def overview_from_items(
+        self, items: list[ContextItem], *, scope: str
+    ) -> EvolutionReport:
+        """Build an evolution summary from an in-memory item list (no storage I/O)."""
         total = 0
         stage_dist: dict[str, int] = {}
         pending_extraction = 0
         pending_convergence = 0
         distill_candidates = 0
 
-        for ref in refs:
-            payload = self.adapter.read(ref)
-            if payload is None:
-                continue
-            try:
-                item = deserialize_context_item(payload)
-            except (KeyError, TypeError, ValueError):
-                continue
+        for item in items:
             if item.is_deleted:
                 continue
-
             total += 1
             stage_key = item.stage.value
             stage_dist[stage_key] = stage_dist.get(stage_key, 0) + 1
 
-            # Count candidates
             if item.stage == Stage.raw:
-                # Raw items with structured content are extraction candidates
                 if isinstance(item.content, dict):
                     pending_extraction += 1
             elif item.stage == Stage.extracted:
-                # Extracted items that have supporting links are convergence candidates
                 pending_convergence += 1
             elif item.stage == Stage.knowledge:
-                # Knowledge items with high access count are distillation candidates
                 if item.access_count >= 5:
                     distill_candidates += 1
 
@@ -1102,8 +1178,22 @@ class ContextSeek:
                 "stages": stage_dist,
             },
         )
-
         return report
+
+    def overview(self, *, scope: str) -> EvolutionReport:
+        """Read-only summary of items in a scope: stages and evolution-style counts.
+
+        Scans all items and categorises them by stage, identifying
+        candidates for extraction, convergence, and distillation.
+
+        Args:
+            scope: Scope to analyse.
+
+        Returns:
+            EvolutionReport with stage distribution and candidate counts.
+        """
+        items = self._load_scope_items(scope=scope)
+        return self.overview_from_items(items, scope=scope)
 
     def feedback(
         self,
@@ -1305,26 +1395,7 @@ class ContextSeek:
         Returns:
             ContextItems sorted by ``created_at`` ascending.
         """
-        prefix = self.resolver.prefix_for(scope)
-        refs = self.adapter.ls(prefix)
-
-        result: list[ContextItem] = []
-        for ref in refs:
-            payload = self.adapter.read(ref)
-            if payload is None:
-                continue
-            try:
-                item = deserialize_context_item(payload)
-            except (KeyError, TypeError, ValueError):
-                continue
-            if item.is_deleted:
-                continue
-            if stage is not None and item.stage != stage:
-                continue
-            result.append(item)
-
-        # Sort by created_at ascending
-        result.sort(key=lambda x: x.created_at)
+        result = self._load_scope_items(scope=scope, stage=stage)
 
         self._emit_audit(
             action="items",
@@ -1740,6 +1811,29 @@ class ContextSeek:
 
         # 3. Build embedder (None if provider="none")
         embedder = build_embedder(settings.embedding)
+
+        # 3a. Zero-config embedding: when seekdb backend is active and no external
+        # embedder is configured, bridge pyseekdb's built-in all-MiniLM-L6-v2
+        # (384-dim ONNX, no API key) so retrieval uses vector search automatically.
+        if embedder is None and settings.storage.backend == "seekdb":
+            try:
+                import pyseekdb as _pyseekdb
+
+                _seekdb_ef = _pyseekdb.get_default_embedding_function()
+
+                def _seekdb_embed(text: str, _ef: Any = _seekdb_ef) -> list[float]:
+                    return _ef([text])[0]
+
+                embedder = _seekdb_embed
+            except Exception:
+                pass
+
+        # 3c. Detect an embedding-dimension change vs the indexed data and warn
+        # that a reindex is needed (old vectors live in a different space).
+        if settings.storage.backend == "seekdb" and embedder is not None:
+            _warn_on_embedding_dims_change(
+                adapter, embedder, configured_dims=settings.embedding.dims
+            )
 
         # 3b. Build a shared LLM (None if provider="none") and reuse it for
         # the summarizer to avoid creating duplicate model instances.
