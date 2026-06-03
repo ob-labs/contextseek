@@ -26,6 +26,7 @@ Usage-focused guides for integrating ContextSeek into agents and applications.
 | [Write & retrieve](guides/write-and-retrieve.md) | `add`/`retrieve` pipeline, filters, agent loop, ops tips |
 | [Provenance & audit](guides/provenance-and-audit.md) | Evidence chain, upstream, forget/delete |
 | [Evolution](guides/evolution.md) | compact, dream, feedback, overview, skills |
+| [CLI (client-side)](guides/cli.md) | Personal mode: init, daemon, sync, seekdb, full command reference |
 | [Storage backends](guides/storage.md) | InMemory, File, OceanBase |
 | [Observability](guides/observability.md) | Audit log, Prometheus metrics, production tips |
 

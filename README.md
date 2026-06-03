@@ -42,11 +42,23 @@ for hit in ctx.retrieve("distributed database", scope="acme/db/engineer", k=10):
 
 Configure via `.env` (see [.env.example](.env.example)) or `ContextSeekSettings` in code. A storage backend, an embedding provider, and an LLM are the three required pieces.
 
+Prefer the command line? The `contextseek` CLI runs a self-contained personal knowledge base with the embedded `seekdb` backend — no external service required:
+
+```bash
+pip install "contextseek[seekdb]"
+contextseek init                                   # set up ~/.contextseek/ + background daemon
+contextseek sync ~/notes --scope me/work           # import notes/docs (format auto-detected)
+contextseek retrieve --scope me/work --query "..." # retrieve from the CLI or expose it over MCP
+```
+
+See the [CLI guide](docs/en/guides/cli.md) for the full command reference.
+
 ## Documentation
 
 - [Getting started (EN)](docs/en/getting-started/quickstart.md) / [快速上手 (ZH)](docs/zh/getting-started/quickstart.md): installation, `.env` setup, and a walkthrough of the core operations.
 - [Client API reference](docs/en/reference/api.md): full method signatures for `add`, `retrieve`, `expand`, `compact`, `dream`, `evidence_chain`, and more.
 - [Configuration reference](docs/en/getting-started/configuration.md): all environment variables and `ContextSeekSettings` fields.
+- [CLI (client-side)](docs/en/guides/cli.md) / [中文](docs/zh/guides/cli.md): personal mode with embedded `seekdb` — `init`, the background `daemon`, `sync`, and the full command reference.
 - [DataPlugs](docs/en/guides/integrations/dataplugs.md): how to ingest from RAG pipelines, memory stores, execution traces, and skill / tool registries.
 - [LangChain middleware](docs/en/guides/integrations/langchain-middleware.md) / [中文](docs/zh/guides/integrations/langchain-middleware.md): drop-in `AgentMiddleware` that wires ContextSeek retrieval, storage, and compaction into a `create_agent()` agent — example below.
 - [Examples](examples/README.md): annotated scripts for common workflows.

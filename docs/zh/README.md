@@ -26,6 +26,7 @@
 | [写入与检索](guides/write-and-retrieve.md) | 写入/检索管线、过滤、Agent 闭环、运维建议 |
 | [溯源与审计](guides/provenance-and-audit.md) | 证据链、upstream、forget/delete |
 | [上下文演进](guides/evolution.md) | compact、dream、feedback、overview、skill |
+| [CLI 命令行（端侧）](guides/cli.md) | 个人模式：init、daemon、sync、seekdb、命令全表 |
 | [存储后端](guides/storage.md) | InMemory、File、OceanBase |
 | [可观测性](guides/observability.md) | 审计日志、Prometheus 指标、生产建议 |
 

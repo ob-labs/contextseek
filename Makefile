@@ -7,6 +7,7 @@ UVICORN ?= $(PYTHON) -m uvicorn
 	test test-unit test-integration test-cov \
 	lint format check \
 	build clean \
+	bump \
 	demo-langchain demo-http
 
 help:
@@ -32,6 +33,9 @@ help:
 	@echo "Build:"
 	@echo "  make build   # Build wheel + sdist"
 	@echo "  make clean   # Remove build artifacts and caches"
+	@echo ""
+	@echo "Release:"
+	@echo "  make bump VERSION=X.Y.Z   # Set version in pyproject.toml + refresh uv.lock"
 	@echo ""
 	@echo "Demo:"
 	@echo "  make demo-langchain   # Run LangChain-style ContextSeek demo"
@@ -89,6 +93,19 @@ clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type f -name "*.pyc" -delete
 	rm -rf dist/ build/ .coverage htmlcov/
+
+# ── Release ───────────────────────────────────────────────────────────────────
+
+# Bump the single source of truth (pyproject.toml) and refresh the lockfile.
+# Usage: make bump VERSION=0.1.3
+bump:
+	@test -n "$(VERSION)" || { echo "error: VERSION is required, e.g. make bump VERSION=0.1.3"; exit 1; }
+	@echo "$(VERSION)" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([abc]|rc|\.post|\.dev)?[0-9]*$$' \
+		|| { echo "error: VERSION '$(VERSION)' is not a valid PEP 440 version (expected X.Y.Z)"; exit 1; }
+	$(PYTHON) -c "import re,pathlib; p=pathlib.Path('pyproject.toml'); t=p.read_text(); t,n=re.subn(r'(?m)^version = \".*\"', 'version = \"$(VERSION)\"', t, count=1); assert n==1, 'version line not found in pyproject.toml'; p.write_text(t)"
+	$(UV) lock
+	@echo "Bumped to $(VERSION). Review with: git diff pyproject.toml uv.lock"
+	@echo "Next: commit, merge to main, then tag v$(VERSION) to trigger the release workflow."
 
 # ── Demo ──────────────────────────────────────────────────────────────────────
 

@@ -40,11 +40,23 @@ for hit in ctx.retrieve("分布式数据库", scope="acme/db/engineer", k=10):
 
 通过 `.env` 配置（参见 [.env.example](.env.example)）或在代码中构造 `ContextSeekSettings`。存储后端、Embedding 提供方和 LLM 是三个必要配置项。
 
+更习惯命令行？`contextseek` CLI 用内置 `seekdb` 跑一个自包含的个人知识库，无需任何外部服务：
+
+```bash
+pip install "contextseek[seekdb]"
+contextseek init                                   # 初始化 ~/.contextseek/ 及后台 daemon
+contextseek sync ~/notes --scope me/work           # 导入笔记/文档（自动识别格式）
+contextseek retrieve --scope me/work --query "..." # 在 CLI 检索，或通过 MCP 暴露
+```
+
+完整命令见 [CLI 指南](docs/zh/guides/cli.md)。
+
 ## 文档
 
 - [快速上手 (ZH)](docs/zh/getting-started/quickstart.md) / [Getting started (EN)](docs/en/getting-started/quickstart.md)：安装、`.env` 配置，以及核心操作的完整演示。
 - [客户端 API 参考](docs/zh/reference/api.md)：`add`、`retrieve`、`expand`、`compact`、`dream`、`evidence_chain` 等方法的完整签名。
 - [配置参考](docs/zh/getting-started/configuration.md)：所有环境变量与 `ContextSeekSettings` 字段。
+- [CLI 命令行（端侧）](docs/zh/guides/cli.md) / [English](docs/en/guides/cli.md)：内置 `seekdb` 的个人模式 —— `init`、后台 `daemon`、`sync` 与命令全表。
 - [DataPlug 指南](docs/zh/guides/integrations/dataplugs.md)：如何从 RAG 流水线、记忆库、执行轨迹及工具注册表导入数据。
 - [LangChain Middleware](docs/zh/guides/integrations/langchain-middleware.md) / [English](docs/en/guides/integrations/langchain-middleware.md)：开箱即用的 `AgentMiddleware`，把 ContextSeek 的检索、存储与 compact 接入 `create_agent()` 构建的 Agent —— 示例见下方。
 - [示例](examples/README.md)：常见工作流的完整示例脚本。
