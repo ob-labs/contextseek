@@ -44,8 +44,7 @@ def _configure_storage(data_dir: Path) -> str:
         except ImportError:
             backend = "file"
             print(
-                "[desktop-server] pyseekdb not installed; "
-                "falling back to file backend",
+                "[desktop-server] pyseekdb not installed; falling back to file backend",
                 flush=True,
             )
         os.environ["STORAGE_BACKEND"] = backend
@@ -59,7 +58,9 @@ def _configure_storage(data_dir: Path) -> str:
 
 def run_desktop_server(args: argparse.Namespace) -> int:
     """Launch uvicorn serving the same-origin (API + SPA) app."""
-    data_dir = Path(args.data_dir).expanduser() if args.data_dir else _default_data_dir()
+    data_dir = (
+        Path(args.data_dir).expanduser() if args.data_dir else _default_data_dir()
+    )
     data_dir.mkdir(parents=True, exist_ok=True)
 
     backend = _configure_storage(data_dir)
