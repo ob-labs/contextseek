@@ -111,7 +111,8 @@ fn spawn_sidecar(app: &AppHandle, port: u16) -> Result<(), String> {
 
 fn current_port(app: &AppHandle) -> u16 {
     let state = app.state::<AppState>();
-    *state.port.lock().unwrap()
+    let port = *state.port.lock().unwrap();
+    port
 }
 
 fn health_url(port: u16) -> String {
@@ -194,7 +195,8 @@ fn start_backend(app: &AppHandle) {
 fn kill_sidecar(app: &AppHandle) {
     let state = app.state::<AppState>();
     let port = *state.port.lock().unwrap();
-    if let Some(child) = state.child.lock().unwrap().take() {
+    let child = state.child.lock().unwrap().take();
+    if let Some(child) = child {
         // Ask the sidecar to shutdown gracefully first; if it does not exit
         // within the grace period, force-kill the process.
         let _ = ureq::post(&shutdown_url(port))
