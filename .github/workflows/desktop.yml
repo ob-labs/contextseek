@@ -67,7 +67,9 @@ jobs:
 
       - name: Tauri build
         working-directory: desktop/tauri
-        run: cargo tauri build
+        # `tauri` (not `cargo tauri`) — the npm @tauri-apps/cli provides the
+        # standalone `tauri` binary, not the `cargo-tauri` subcommand.
+        run: tauri build
 
       # NOTE: code signing / notarization require secrets (Apple Developer ID,
       # Windows signing cert). Wire them here once provisioned, e.g. via
