@@ -99,11 +99,13 @@ def _merge_hoisted(
             d["content"] = json.loads(content)
         except (json.JSONDecodeError, TypeError):
             d["content"] = content
-    else:
+    elif "content" not in d:
+        # Backward compat: old payloads stored content inside the JSON blob itself;
+        # only fall back to empty string when the field is genuinely absent.
         d["content"] = ""
 
-    d["abstract"] = abstract or ""
-    d["summary"] = summary or ""
+    d["abstract"] = abstract if abstract is not None else d.get("abstract", "")
+    d["summary"] = summary if summary is not None else d.get("summary", "")
 
     emb = _parse_vector(abstract_embedding)
     if emb is not None:

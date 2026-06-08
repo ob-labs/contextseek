@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from contextseek._version import __version__ as PACKAGE_VERSION
@@ -13,6 +14,7 @@ from contextseek.domain.serialization import (
 
 try:
     from fastapi import FastAPI
+    from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel, Field
 except ImportError as exc:
     msg = (
@@ -110,6 +112,23 @@ class ItemsRequest(BaseModel):
 def create_app(client: ContextSeek | None = None) -> FastAPI:
     """Create FastAPI application backed by ContextSeek."""
     app = FastAPI(title="ContextSeek API", version=PACKAGE_VERSION)
+
+    # CORS — required when the front-end runs on a different origin (separate
+    # port / host). Origins come from CTX_CORS_ORIGINS (comma-separated), or "*"
+    # by default. allow_credentials stays False so "*" is permitted.
+    origins = [
+        o.strip()
+        for o in os.environ.get("CTX_CORS_ORIGINS", "*").split(",")
+        if o.strip()
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins or ["*"],
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     ctx = client or ContextSeek.from_settings()
 
     @app.post("/add")
@@ -276,6 +295,14 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
     @app.get("/metrics")
     async def metrics() -> str:
         return ctx.audit_log.export_prometheus() if ctx.audit_log is not None else ""
+
+    @app.post("/seed")
+    async def seed_examples() -> dict[str, Any]:
+        """Populate the ``contextseek`` scope with example data (idempotent)."""
+        from contextseek.http.seed import maybe_seed
+
+        seeded = maybe_seed()
+        return {"status": "ok", "seeded": seeded}
 
     @app.get("/health")
     async def health() -> dict[str, str]:

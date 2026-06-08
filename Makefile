@@ -8,7 +8,8 @@ UVICORN ?= $(PYTHON) -m uvicorn
 	lint format check \
 	build clean \
 	bump \
-	demo-langchain demo-http
+	demo-langchain \
+	backend frontend
 
 help:
 	@echo "Available targets:"
@@ -39,7 +40,10 @@ help:
 	@echo ""
 	@echo "Demo:"
 	@echo "  make demo-langchain   # Run LangChain-style ContextSeek demo"
-	@echo "  make demo-http        # Start FastAPI server at 127.0.0.1:8000"
+	@echo ""
+	@echo "Dev servers:"
+	@echo "  make backend          # Start API server at 127.0.0.1:8000 (with --reload)"
+	@echo "  make frontend         # Build + serve SPA at 127.0.0.1:3000 (needs backend)"
 	@echo ""
 	@echo "Benchmark targets are in eval/Makefile:"
 	@echo "  make -f eval/Makefile help"
@@ -112,5 +116,11 @@ bump:
 demo-langchain:
 	PYTHONPATH=src $(PYTHON) examples/langchain_pipeline.py
 
-demo-http:
+backend:
 	PYTHONPATH=src $(UVICORN) contextseek.http.server:app --host 127.0.0.1 --port 8000 --reload
+
+frontend:
+	@command -v npm >/dev/null 2>&1 || { echo "npm is required (install Node.js)"; exit 2; }
+	npm --prefix dashboard install
+	npm --prefix dashboard run build
+	npm --prefix dashboard run preview

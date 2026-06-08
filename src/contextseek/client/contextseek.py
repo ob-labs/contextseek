@@ -974,7 +974,7 @@ class ContextSeek:
 
         # BFS through derivation links
         queue: list[ContextItem] = [start_item]
-        traceable_relations = {LinkType.derived_from, LinkType.supported_by}
+        traceable_relations = {LinkType.derived_from, LinkType.supported_by, LinkType.synthesized_from}
 
         while queue:
             current = queue.pop(0)

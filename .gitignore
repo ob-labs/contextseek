@@ -13,6 +13,10 @@ venv/
 .env.local
 .env.*.local
 
+# Node / dashboard front-end
+node_modules/
+dashboard/dist/
+
 # Packaging / build
 build/
 dist/
