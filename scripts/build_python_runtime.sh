@@ -49,6 +49,27 @@ elif "${PY}" -c "import pyseekdb" >/dev/null 2>&1; then
   SEEKDB_ARGS+=(--collect-all pyseekdb)
 fi
 
+# LangChain/OpenAI embedding stack: bundle fully when present. These packages
+# do import-time `importlib.metadata` version checks and tiktoken loads its
+# `tiktoken_ext.openai_public` plugin dynamically, both of which PyInstaller's
+# static analysis misses — so collect data + metadata and pin the hidden import.
+EMBED_ARGS=()
+if "${PY}" -c "import langchain_openai" >/dev/null 2>&1; then
+  EMBED_ARGS+=(
+    --collect-all langchain_openai --copy-metadata langchain-openai
+    --collect-all langchain_core --copy-metadata langchain-core
+  )
+fi
+if "${PY}" -c "import openai" >/dev/null 2>&1; then
+  EMBED_ARGS+=(--collect-all openai --copy-metadata openai)
+fi
+if "${PY}" -c "import tiktoken" >/dev/null 2>&1; then
+  EMBED_ARGS+=(
+    --collect-all tiktoken --copy-metadata tiktoken
+    --hidden-import tiktoken_ext.openai_public
+  )
+fi
+
 "${PY}" -m PyInstaller \
   --noconfirm --clean --onefile \
   --name "${NAME}" \
@@ -57,7 +78,7 @@ fi
   --specpath "${WORK}" \
   --collect-all contextseek \
   ${SEEKDB_ARGS[@]+"${SEEKDB_ARGS[@]}"} \
-  --collect-submodules langchain_openai \
+  ${EMBED_ARGS[@]+"${EMBED_ARGS[@]}"} \
   "${WORK}/entry.py"
 
 cp "${WORK}/dist/${NAME}${EXE}" "${OUT_DIR}/${NAME}-${TRIPLE}${EXE}"
