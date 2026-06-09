@@ -10,7 +10,8 @@ UVICORN ?= $(PYTHON) -m uvicorn
 	bump \
 	demo-langchain \
 	backend frontend \
-	desktop-server desktop-spa desktop-sidecar desktop-package desktop-dev
+	desktop-server desktop-spa desktop-sidecar desktop-package desktop-dev \
+	desktop-check desktop-build-linux
 
 help:
 	@echo "Available targets:"
@@ -52,6 +53,8 @@ help:
 	@echo "  make desktop-sidecar  # Bundle the Python sidecar (PyInstaller)"
 	@echo "  make desktop-package  # Full desktop build: SPA + sidecar + tauri build"
 	@echo "  make desktop-dev      # Run the Tauri shell in dev mode (needs Rust + webkit2gtk-4.1)"
+	@echo "  make desktop-check       # cargo check in Docker (validate Rust before pushing)"
+	@echo "  make desktop-build-linux # Full Linux package (AppImage/deb) in Docker"
 	@echo ""
 	@echo "Benchmark targets are in eval/Makefile:"
 	@echo "  make -f eval/Makefile help"
@@ -154,3 +157,11 @@ desktop-package:
 
 desktop-dev:
 	cd desktop/tauri && cargo tauri dev
+
+# Docker-based (host distro lacks webkit2gtk-4.1 / new glib). First run builds
+# the image and compiles deps; caches persist in named volumes afterward.
+desktop-check:
+	bash scripts/desktop_in_docker.sh check
+
+desktop-build-linux:
+	bash scripts/desktop_in_docker.sh build
