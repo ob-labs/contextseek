@@ -143,66 +143,41 @@ class ContextSeekMiddleware(
         model: BaseChatModel | str | None,
         embedder: Embeddings | None,
     ) -> ContextSeek:
-        from seekvfs import VFS
+        import dataclasses
 
-        from contextseek.embedders.langchain_embedder import LangChainEmbedder
-        from contextseek.storage.ob_backend import OceanBaseBackend
-        from contextseek.storage.storage_adapter import SeekVFSStorageAdapter
-        from contextseek.config.factory import (
-            build_embedder,
-            build_llm,
-            build_summarizer,
-        )
+        from contextseek.client.contextseek import ContextSeek as _ContextSeek
+        from contextseek.config.factory import build_summarizer
         from contextseek.config.settings import ContextSeekSettings
-        from contextseek.routing.resolver import ScopeResolver
+        from contextseek.embedders.langchain_embedder import LangChainEmbedder
 
         settings = ContextSeekSettings()
 
-        dims = self._resolve_vector_dims(embedder, settings.embedding)
+        # Delegate backend selection (memory / seekdb / oceanbase / file),
+        # embedder bridging (seekdb built-in ONNX), and resolver construction
+        # entirely to the canonical factory so this middleware stays in sync
+        # with any new backends added to contextseek.
+        ctx = _ContextSeek.from_settings(settings)
 
+        # Override embedder when the caller supplied a LangChain Embeddings
+        # object — takes priority over both env-var config and seekdb built-in.
         if embedder is not None:
-            embedding_fn: Callable[[str], list[float]] | None = LangChainEmbedder(
-                embedder, dims=dims
+            dims = self._resolve_vector_dims(embedder, settings.embedding)
+            ctx = dataclasses.replace(
+                ctx, embedder=LangChainEmbedder(embedder, dims=dims)
             )
-        else:
-            embedding_fn = build_embedder(settings.embedding)
 
-        backend = OceanBaseBackend(
-            table_name=settings.ob.table_name,
-            vector_dims=dims,
-            host=settings.ob.host,
-            port=settings.ob.port,
-            user=settings.ob.user,
-            password=settings.ob.password,
-            db_name=settings.ob.db_name,
-        )
-        backend.initialize()
-
-        vfs = VFS(
-            routes={settings.storage.uri_scheme: {"backend": backend}},
-            scheme=settings.storage.uri_scheme,
-        )
-        adapter = SeekVFSStorageAdapter(vfs)
-
-        resolver = ScopeResolver(uri_scheme=settings.storage.uri_scheme)
-
+        # Override summarizer when the caller supplied a model — avoids
+        # spinning up a second LLM instance when the agent already has one.
         if model is not None:
             if isinstance(model, str):
                 from langchain.chat_models import init_chat_model
 
                 model = init_chat_model(model)
-            summarizer = build_summarizer(settings.summarizer, llm=model)
-        else:
-            summarizer = build_summarizer(
-                settings.summarizer, llm=build_llm(settings.llm)
+            ctx = dataclasses.replace(
+                ctx, summarizer=build_summarizer(settings.summarizer, llm=model)
             )
 
-        return ContextSeek(
-            adapter=adapter,
-            resolver=resolver,
-            embedder=embedding_fn,
-            summarizer=summarizer,
-        )
+        return ctx
 
     @staticmethod
     def _resolve_vector_dims(
