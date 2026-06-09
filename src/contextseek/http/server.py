@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import signal
+import threading
+from pathlib import Path
 from typing import Any
 
 from contextseek._version import __version__ as PACKAGE_VERSION
@@ -15,7 +18,9 @@ from contextseek.domain.serialization import (
 try:
     from fastapi import FastAPI
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel, Field
+    from starlette.exceptions import HTTPException as StarletteHTTPException
 except ImportError as exc:
     msg = (
         "FastAPI dependencies are not installed. "
@@ -107,6 +112,69 @@ class SkillContextRequest(BaseModel):
 class ItemsRequest(BaseModel):
     scope: str
     stage: str | None = None
+
+
+_API_ROOT_SEGMENTS: set[str] = {
+    "add",
+    "retrieve",
+    "expand",
+    "forget",
+    "delete",
+    "compact",
+    "dream",
+    "feedback",
+    "upstream",
+    "evidence_chain",
+    "chain_confidence",
+    "skill_tools",
+    "skill_context",
+    "items",
+    "overview",
+    "metrics",
+    "seed",
+    "health",
+    "__desktop",
+}
+
+
+class SPAServingStaticFiles(StaticFiles):
+    """StaticFiles that falls back to ``index.html`` for SPA routes."""
+
+    async def get_response(self, path: str, scope: dict[str, Any]) -> Any:
+        # Starlette's StaticFiles raises HTTPException(404) (rather than returning
+        # a 404 response) when a path has no matching file, so the SPA fallback
+        # must catch it instead of inspecting a status code.
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            if scope.get("method") not in {"GET", "HEAD"}:
+                raise
+            root = path.split("/", 1)[0].strip()
+            if root in _API_ROOT_SEGMENTS:
+                raise
+            return await super().get_response("index.html", scope)
+
+
+def _dashboard_dist_dir() -> Path | None:
+    """Locate the built dashboard SPA (``dashboard/dist``).
+
+    Order: ``CTX_DASHBOARD_DIST`` env (packaged builds set this) → package-relative
+    ``<repo>/dashboard/dist`` → ``<cwd>/dashboard/dist``. Returns ``None`` when no
+    build exists, so the bare API still works without a front-end.
+    """
+    candidates: list[Path] = []
+    env_dir = os.environ.get("CTX_DASHBOARD_DIST", "").strip()
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+    # src/contextseek/http/server.py -> repo root is three parents up.
+    candidates.append(Path(__file__).resolve().parents[3] / "dashboard" / "dist")
+    candidates.append(Path.cwd() / "dashboard" / "dist")
+    for c in candidates:
+        if (c / "index.html").is_file():
+            return c
+    return None
 
 
 def create_app(client: ContextSeek | None = None) -> FastAPI:
@@ -308,7 +376,40 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok", "version": PACKAGE_VERSION}
 
+    @app.post("/__desktop/shutdown", include_in_schema=False)
+    async def desktop_shutdown() -> dict[str, str]:
+        """Shutdown hook for the desktop host graceful-exit flow."""
+        if os.environ.get("CTX_ENABLE_DESKTOP_SHUTDOWN", "1") != "1":
+            return {"status": "disabled"}
+
+        pid = os.getpid()
+
+        def _terminate() -> None:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+        threading.Timer(0.1, _terminate).start()
+        return {"status": "stopping"}
+
+    # Serve the built dashboard SPA at "/" for same-origin desktop/single-process
+    # use. Mounted LAST so the API routes above take precedence. Skipped when the
+    # SPA isn't built or StaticFiles is unavailable (bare-API mode still works).
+    dist = _dashboard_dist_dir()
+    if dist is not None:
+        app.mount("/", SPAServingStaticFiles(directory=str(dist), html=True), name="ui")
+
     return app
 
 
-app = create_app()
+def __getattr__(name: str) -> Any:
+    """Lazily build the ASGI ``app`` on first access (PEP 562).
+
+    ``uvicorn contextseek.http.server:app`` still works, but merely importing
+    this module no longer constructs a full ContextSeek client (which would load
+    settings/LLM/embedder) as an import-time side effect.
+    """
+    if name == "app":
+        return create_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

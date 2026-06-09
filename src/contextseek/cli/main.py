@@ -321,6 +321,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="detect format and count items without writing",
     )
 
+    # desktop-server — single-process backend for the desktop app: serves the
+    # API and the built dashboard SPA from one origin.
+    desktop_parser = subparsers.add_parser(
+        "desktop-server",
+        help="run the same-origin backend (API + dashboard SPA) for the desktop app",
+    )
+    desktop_parser.add_argument("--host", default="127.0.0.1")
+    desktop_parser.add_argument("--port", type=int, default=None)
+    desktop_parser.add_argument(
+        "--data-dir",
+        default=None,
+        help="data directory (default: platform app-data dir)",
+    )
+    desktop_parser.add_argument("--log-level", default="info")
+
     return parser
 
 
@@ -332,6 +347,13 @@ def run_cli(
 
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # desktop-server sets storage/data-dir env defaults before settings are read,
+    # so it must run before ContextSeekSettings() below.
+    if args.command == "desktop-server":
+        from contextseek.cli.desktop import run_desktop_server
+
+        return run_desktop_server(args)
 
     settings = ContextSeekSettings()
 

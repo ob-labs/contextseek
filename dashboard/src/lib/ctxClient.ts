@@ -28,10 +28,12 @@ import type {
   UpstreamResponse,
 } from "./types";
 
-// Backend API base URL, injected at build time via VITE_CTX_BASE. Defaults to
-// the local backend on :8000. Front-end and backend run as separate processes
-// (separate ports/hosts), so this is an absolute, cross-origin URL.
-const BASE = import.meta.env.VITE_CTX_BASE ?? "http://127.0.0.1:8000";
+// Backend API base URL. Defaults to "" (relative) so the SPA calls /add,
+// /retrieve, ... on its own origin — the single-process / desktop model where
+// FastAPI serves both the API and this SPA (see contextseek.http.server). For
+// separate-process development (front-end on a different port/host), set
+// VITE_CTX_BASE to the absolute backend URL at build time.
+const BASE = import.meta.env.VITE_CTX_BASE ?? "";
 
 export class CtxError extends Error {
   constructor(

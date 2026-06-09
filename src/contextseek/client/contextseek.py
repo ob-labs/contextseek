@@ -228,6 +228,11 @@ def _build_adapter_from_settings(settings: Any) -> SeekVFSAdapter:
                 db_name=ob.db_name,
             )
         backend.initialize()
+    elif storage.backend == "sqlite":
+        from contextseek.storage.sqlite_backend import SQLiteBackend
+
+        backend = SQLiteBackend(path=settings.sqlite.path)
+        backend.initialize()
     elif storage.backend == "seekdb":
         from contextseek.storage.seekdb_backend import SeekDBBackend
 
@@ -1823,6 +1828,8 @@ class ContextSeek:
         # 3a. Zero-config embedding: when seekdb backend is active and no external
         # embedder is configured, bridge pyseekdb's built-in all-MiniLM-L6-v2
         # (384-dim ONNX, no API key) so retrieval uses vector search automatically.
+        # The sqlite backend deliberately does NOT do this — it stays dependency-
+        # light (FTS by default; configure an external embedder for vector recall).
         if embedder is None and settings.storage.backend == "seekdb":
             try:
                 import pyseekdb as _pyseekdb
@@ -1838,7 +1845,7 @@ class ContextSeek:
 
         # 3c. Detect an embedding-dimension change vs the indexed data and warn
         # that a reindex is needed (old vectors live in a different space).
-        if settings.storage.backend == "seekdb" and embedder is not None:
+        if settings.storage.backend in ("seekdb", "sqlite") and embedder is not None:
             _warn_on_embedding_dims_change(
                 adapter, embedder, configured_dims=settings.embedding.dims
             )

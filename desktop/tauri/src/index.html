@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ContextSeek</title>
+    <style>
+      html, body {
+        margin: 0; height: 100%;
+        background: #0f1117; color: #e6e8ee;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      .wrap {
+        height: 100%; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 18px;
+      }
+      .logo { font-size: 22px; font-weight: 600; letter-spacing: .5px; }
+      .spinner {
+        width: 34px; height: 34px; border-radius: 50%;
+        border: 3px solid #2a2f3a; border-top-color: #6ea8fe;
+        animation: spin 0.9s linear infinite;
+      }
+      .hint { color: #8b90a0; font-size: 13px; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="logo">ContextSeek</div>
+      <div class="spinner"></div>
+      <div class="hint">Starting local service…</div>
+    </div>
+    <script>
+      // The Host navigates this window to the local server once /health passes,
+      // or to diagnostic.html on failure. If the sidecar dies later, show a hint.
+      window.addEventListener("sidecar-down", function () {
+        document.querySelector(".hint").textContent =
+          "Local service stopped. Attempting to recover…";
+      });
+    </script>
+  </body>
+</html>

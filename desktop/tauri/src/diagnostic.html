@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ContextSeek — Startup Failed</title>
+    <style>
+      html, body {
+        margin: 0; height: 100%;
+        background: #0f1117; color: #e6e8ee;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+      }
+      .wrap {
+        max-width: 640px; margin: 0 auto; padding: 48px 24px;
+        display: flex; flex-direction: column; gap: 16px;
+      }
+      h1 { font-size: 20px; margin: 0; }
+      p, li { color: #b6bac6; line-height: 1.6; font-size: 14px; }
+      code { background: #1b1f29; padding: 2px 6px; border-radius: 4px; }
+      .row { display: flex; gap: 12px; margin-top: 8px; }
+      button {
+        background: #2a3140; color: #e6e8ee; border: 1px solid #3a4150;
+        padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+      }
+      button:hover { background: #353d4e; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>Local service failed to start</h1>
+      <p>ContextSeek could not start the backend on port <code id="port">?</code>. Common causes:</p>
+      <ul>
+        <li>Port already in use</li>
+        <li>Bundled runtime is corrupted or missing dependencies</li>
+        <li>Data directory permissions or corrupted config</li>
+      </ul>
+      <div class="row">
+        <button onclick="retry()">Retry</button>
+        <button onclick="copyDiag()">Copy diagnostics</button>
+      </div>
+      <p id="copied" style="display:none;color:#6ea8fe;">Copied to clipboard</p>
+    </div>
+    <script>
+      const port = new URLSearchParams(location.search).get("port") || "?";
+      document.getElementById("port").textContent = port;
+      async function retry() {
+        const btn = document.querySelector("button");
+        if (btn) btn.disabled = true;
+        try {
+          const invoke = window.__TAURI__?.core?.invoke;
+          if (typeof invoke === "function") {
+            await invoke("restart_service");
+          }
+        } finally {
+          location.reload();
+        }
+      }
+      function copyDiag() {
+        const info = [
+          "ContextSeek diagnostic",
+          "port=" + port,
+          "ua=" + navigator.userAgent,
+          "time=" + new Date().toISOString(),
+        ].join("\n");
+        navigator.clipboard.writeText(info).then(() => {
+          const c = document.getElementById("copied");
+          c.style.display = "block";
+        });
+      }
+    </script>
+  </body>
+</html>

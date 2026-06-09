@@ -134,8 +134,8 @@ class StorageSettings(BaseSettings):
     model_config = nested_section_config("STORAGE_")
 
     backend: str = "memory"
-    """Backend type: "memory", "file", "seekdb", or "oceanbase".
-    Personal installs default to "seekdb" via ~/.contextseek/config.env."""
+    """Backend type: "memory", "file", "sqlite", "seekdb", or "oceanbase".
+    Desktop/personal installs default to "sqlite" (cross-platform, no native deps)."""
 
     path: str = ".contextseek/store"
     """Root path for file-based backend."""
@@ -148,6 +148,15 @@ class StorageSettings(BaseSettings):
 
     cold_path: str = ".contextseek/cold"
     """Root path for cold-tier file backend."""
+
+
+class SQLiteSettings(BaseSettings):
+    """SQLite storage backend configuration (local file, cross-platform)."""
+
+    model_config = nested_section_config("SQLITE_")
+
+    path: str = "~/.contextseek/contextseek.sqlite3"
+    """Path to the SQLite database file."""
 
 
 class SeekDBSettings(BaseSettings):
@@ -427,6 +436,7 @@ class ContextSeekSettings(BaseSettings):
     model_config = settings_config()
 
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    sqlite: SQLiteSettings = Field(default_factory=SQLiteSettings)
     seekdb: SeekDBSettings = Field(default_factory=SeekDBSettings)
     ob: OceanBaseSettings = Field(default_factory=OceanBaseSettings)
     geo: GeoSettings = Field(default_factory=GeoSettings)

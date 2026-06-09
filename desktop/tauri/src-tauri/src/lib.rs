@@ -1,0 +1,302 @@
+// ContextSeek Desktop — Tauri Host.
+//
+// Responsibilities (Rust does lifecycle + platform only; all semantics stay in
+// the Python sidecar):
+//   1. pick a loopback port (fixed first, then a free one),
+//   2. spawn the bundled `contextseek-desktop-server` sidecar,
+//   3. poll GET /health until ready, then point the window at the local server,
+//   4. tray + autostart + restart-on-crash, and graceful shutdown on exit.
+
+use std::sync::Mutex;
+use std::time::Duration;
+use std::{collections::VecDeque, time::Instant};
+
+use tauri::menu::{MenuBuilder, MenuItemBuilder};
+use tauri::tray::{TrayIconBuilder, TrayIconEvent};
+use tauri::{AppHandle, Manager, RunEvent, WebviewWindow};
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use tauri_plugin_shell::ShellExt;
+
+const FIXED_PORT: u16 = 8000;
+const HEALTH_RETRIES: u32 = 15;
+const HEALTH_INTERVAL_MS: u64 = 500;
+const SHUTDOWN_GRACE_MS: u64 = 3500;
+const MAX_CRASH_RESTARTS_PER_MIN: usize = 3;
+const CRASH_WINDOW_SECS: u64 = 60;
+const CRASH_RESTART_BACKOFF_MS: u64 = 1200;
+
+/// Shared runtime state: the live sidecar child and the port it serves on.
+#[derive(Default)]
+struct AppState {
+    child: Mutex<Option<CommandChild>>,
+    port: Mutex<u16>,
+    crash_restarts: Mutex<VecDeque<Instant>>,
+}
+
+/// Return FIXED_PORT if bindable, otherwise an OS-assigned free port.
+fn pick_port() -> u16 {
+    use std::net::TcpListener;
+    if TcpListener::bind(("127.0.0.1", FIXED_PORT)).is_ok() {
+        return FIXED_PORT;
+    }
+    TcpListener::bind(("127.0.0.1", 0))
+        .ok()
+        .and_then(|l| l.local_addr().ok())
+        .map(|a| a.port())
+        .unwrap_or(FIXED_PORT)
+}
+
+/// Spawn the Python sidecar on `port`; store the child in state.
+fn spawn_sidecar(app: &AppHandle, port: u16) -> Result<(), String> {
+    let mut sidecar = app
+        .shell()
+        .sidecar("contextseek-desktop-server")
+        .map_err(|e| format!("sidecar resolve failed: {e}"))?
+        .args(["--host", "127.0.0.1", "--port", &port.to_string()]);
+
+    // Point the sidecar at the SPA bundled as a Tauri resource (see
+    // tauri.conf.json `bundle.resources`). In dev the sidecar falls back to the
+    // repo's dashboard/dist, so this is only required for packaged builds.
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let dist = res_dir.join("dashboard-dist");
+        if dist.join("index.html").is_file() {
+            sidecar = sidecar.env("CTX_DASHBOARD_DIST", dist.to_string_lossy().to_string());
+        }
+    }
+
+    let (mut rx, child) = sidecar
+        .spawn()
+        .map_err(|e| format!("sidecar spawn failed: {e}"))?;
+
+    {
+        let state = app.state::<AppState>();
+        *state.child.lock().unwrap() = Some(child);
+        *state.port.lock().unwrap() = port;
+    }
+
+    // Drain sidecar output; surface unexpected termination to the UI.
+    let app_for_events = app.clone();
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(line) | CommandEvent::Stderr(line) => {
+                    eprintln!("[sidecar] {}", String::from_utf8_lossy(&line));
+                }
+                CommandEvent::Terminated(payload) => {
+                    eprintln!("[sidecar] terminated: {:?}", payload.code);
+                    {
+                        let state = app_for_events.state::<AppState>();
+                        *state.child.lock().unwrap() = None;
+                    }
+                    if let Some(win) = app_for_events.get_webview_window("main") {
+                        let _ = win.eval(
+                            "window.dispatchEvent(new CustomEvent('sidecar-down'));",
+                        );
+                    }
+                    if should_auto_restart(&app_for_events) {
+                        std::thread::sleep(Duration::from_millis(CRASH_RESTART_BACKOFF_MS));
+                        start_backend(&app_for_events);
+                    } else if let Some(win) = app_for_events.get_webview_window("main") {
+                        show_app_or_diagnostic(&win, false, current_port(&app_for_events));
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    Ok(())
+}
+
+fn current_port(app: &AppHandle) -> u16 {
+    let state = app.state::<AppState>();
+    let port = *state.port.lock().unwrap();
+    port
+}
+
+fn health_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/health")
+}
+
+fn shutdown_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/__desktop/shutdown")
+}
+
+/// Poll GET /health until ready. Returns true once the server answers.
+fn wait_for_health(port: u16) -> bool {
+    let url = health_url(port);
+    for _ in 0..HEALTH_RETRIES {
+        if ureq::get(&url)
+            .timeout(Duration::from_millis(800))
+            .call()
+            .is_ok()
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(HEALTH_INTERVAL_MS));
+    }
+    false
+}
+
+/// Wait until health endpoint goes down or timeout.
+fn wait_until_down(port: u16, timeout_ms: u64) -> bool {
+    let url = health_url(port);
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    while Instant::now() < deadline {
+        if ureq::get(&url)
+            .timeout(Duration::from_millis(600))
+            .call()
+            .is_err()
+        {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    false
+}
+
+/// Point the main window at the local server, or the diagnostic page on failure.
+fn show_app_or_diagnostic(win: &WebviewWindow, healthy: bool, port: u16) {
+    let target = if healthy {
+        format!("http://127.0.0.1:{port}/")
+    } else {
+        format!("diagnostic.html?port={port}")
+    };
+    if let Ok(url) = target.parse() {
+        let _ = win.navigate(url);
+    }
+    let _ = win.show();
+    let _ = win.set_focus();
+}
+
+/// Start (or restart) the sidecar and route the window accordingly.
+fn start_backend(app: &AppHandle) {
+    // Kill any previous child first (used by the tray "Restart service").
+    kill_sidecar(app);
+
+    let port = pick_port();
+    let app_handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = spawn_sidecar(&app_handle, port) {
+            eprintln!("{e}");
+        }
+        let healthy =
+            tauri::async_runtime::spawn_blocking(move || wait_for_health(port))
+                .await
+                .unwrap_or(false);
+        if let Some(win) = app_handle.get_webview_window("main") {
+            show_app_or_diagnostic(&win, healthy, port);
+        }
+    });
+}
+
+/// Terminate the sidecar child if running.
+fn kill_sidecar(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let port = *state.port.lock().unwrap();
+    let child = state.child.lock().unwrap().take();
+    if let Some(child) = child {
+        // Ask the sidecar to shutdown gracefully first; if it does not exit
+        // within the grace period, force-kill the process.
+        let _ = ureq::post(&shutdown_url(port))
+            .timeout(Duration::from_millis(700))
+            .call();
+        if !wait_until_down(port, SHUTDOWN_GRACE_MS) {
+            let _ = child.kill();
+        }
+    }
+}
+
+fn should_auto_restart(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    let mut hist = state.crash_restarts.lock().unwrap();
+    let cutoff = Instant::now() - Duration::from_secs(CRASH_WINDOW_SECS);
+    while hist.front().map(|t| *t < cutoff).unwrap_or(false) {
+        let _ = hist.pop_front();
+    }
+    if hist.len() >= MAX_CRASH_RESTARTS_PER_MIN {
+        return false;
+    }
+    hist.push_back(Instant::now());
+    true
+}
+
+#[tauri::command]
+fn restart_service(app: AppHandle) {
+    start_backend(&app);
+}
+
+fn build_tray(app: &AppHandle) -> tauri::Result<()> {
+    let show = MenuItemBuilder::with_id("show", "Show").build(app)?;
+    let hide = MenuItemBuilder::with_id("hide", "Hide").build(app)?;
+    let restart = MenuItemBuilder::with_id("restart", "Restart service").build(app)?;
+    let quit = MenuItemBuilder::with_id("quit", "Quit").build(app)?;
+    let menu = MenuBuilder::new(app)
+        .items(&[&show, &hide, &restart, &quit])
+        .build()?;
+
+    TrayIconBuilder::with_id("main-tray")
+        .icon(app.default_window_icon().unwrap().clone())
+        .menu(&menu)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            "hide" => {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
+            "restart" => start_backend(app),
+            "quit" => {
+                kill_sidecar(app);
+                app.exit(0);
+            }
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click { .. } = event {
+                let app = tray.app_handle();
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ))
+        .invoke_handler(tauri::generate_handler![restart_service])
+        .manage(AppState::default())
+        .setup(|app| {
+            let handle = app.handle();
+            build_tray(handle)?;
+            start_backend(handle);
+            Ok(())
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building ContextSeek desktop app")
+        .run(|app, event| match event {
+            // Keep running in the tray when the last window is closed.
+            RunEvent::ExitRequested { api, .. } => {
+                api.prevent_exit();
+            }
+            RunEvent::Exit => {
+                kill_sidecar(app);
+            }
+            _ => {}
+        });
+}

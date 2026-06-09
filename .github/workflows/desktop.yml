@@ -1,0 +1,134 @@
+name: desktop-build
+
+on:
+  # Manual trigger from the Actions tab.
+  workflow_dispatch:
+  # Build on PRs so reviewers can download installers from the run's artifacts.
+  # Path filter keeps unrelated PRs from triggering the desktop build matrix.
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "dashboard/**"
+      - "src/contextseek/**"
+      - "scripts/build_dashboard.sh"
+      - "scripts/build_python_runtime.sh"
+      - "scripts/package_desktop.sh"
+      - ".github/workflows/desktop.yml"
+      - "pyproject.toml"
+  # Release builds on version tags.
+  push:
+    tags:
+      - "desktop-v*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Linux build deps (webkit2gtk, etc.)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+            librsvg2-dev patchelf libssl-dev
+
+      - name: Install Python sidecar deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[http,openai]" pyinstaller
+
+      - name: Install Tauri CLI
+        run: npm install -g @tauri-apps/cli@^2
+
+      - name: Build dashboard SPA
+        run: bash scripts/build_dashboard.sh
+
+      - name: Bundle Python sidecar
+        run: bash scripts/build_python_runtime.sh
+
+      - name: Tauri build
+        working-directory: desktop/tauri
+        # `tauri` (not `cargo tauri`) — the npm @tauri-apps/cli provides the
+        # standalone `tauri` binary, not the `cargo-tauri` subcommand.
+        run: tauri build
+
+      - name: Resolve desktop version
+        id: app_version
+        shell: bash
+        run: |
+          ver="$(python -c 'import json; print(json.load(open("desktop/tauri/src-tauri/tauri.conf.json", "r", encoding="utf-8"))["version"])')"
+          echo "value=${ver}" >> "$GITHUB_OUTPUT"
+
+      # NOTE: code signing / notarization require secrets (Apple Developer ID,
+      # Windows signing cert). Wire them here once provisioned, e.g. via
+      # tauri-apps/tauri-action or env vars APPLE_*, WINDOWS_CERTIFICATE.
+
+      - name: Checksums
+        shell: bash
+        run: |
+          cd desktop/tauri/src-tauri/target/release/bundle
+          find . -type f \( -name "*.AppImage" -o -name "*.deb" -o -name "*.dmg" \
+            -o -name "*.msi" -o -name "*.exe" \) -print0 \
+            | while IFS= read -r -d '' f; do
+                sha256sum "$f" > "$f.sha256" 2>/dev/null \
+                  || shasum -a 256 "$f" > "$f.sha256"
+              done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: contextseek-desktop-${{ steps.app_version.outputs.value }}-${{ matrix.os }}
+          path: |
+            desktop/tauri/src-tauri/target/release/bundle/**/*.AppImage
+            desktop/tauri/src-tauri/target/release/bundle/**/*.deb
+            desktop/tauri/src-tauri/target/release/bundle/**/*.dmg
+            desktop/tauri/src-tauri/target/release/bundle/**/*.msi
+            desktop/tauri/src-tauri/target/release/bundle/**/*.exe
+            desktop/tauri/src-tauri/target/release/bundle/**/*.sha256
+          if-no-files-found: ignore
+
+  smoke-test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install + smoke-test desktop-server
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[http,openai]"
+          bash scripts/build_dashboard.sh
+          # Clean config so no dev .env enables an LLM that needs a key.
+          printf 'STORAGE_BACKEND=sqlite\n' > /tmp/ci.env
+          CONTEXTSEEK_CONFIG=/tmp/ci.env contextseek desktop-server \
+            --port 8799 --data-dir /tmp/ci-ctx &
+          for i in $(seq 1 30); do
+            curl -sf localhost:8799/health && break || sleep 1
+          done
+          curl -sf localhost:8799/health
+          curl -sf localhost:8799/ | grep -qi "<div id=\"root\""
+          curl -sf localhost:8799/settings | grep -qi "<div id=\"root\""
+          echo "smoke test passed"
