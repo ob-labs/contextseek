@@ -1207,15 +1207,16 @@ class ContextSeek:
         # Resolve the underlying VFS backend (OceanBase, seekdb, file, memory, …)
         raw_backend = None
         if isinstance(adapter, SeekVFSStorageAdapter):
-            raw_backend = adapter._resolve_backend(
-                adapter._inner_scheme + "x/y"
-            )
+            raw_backend = adapter._resolve_backend(adapter._inner_scheme + "x/y")
 
         # OceanBase: dedicated scope column → single SQL query
         try:
             from contextseek.storage.ob_backend import OceanBaseBackend
 
-            if isinstance(raw_backend, OceanBaseBackend) and raw_backend._table is not None:
+            if (
+                isinstance(raw_backend, OceanBaseBackend)
+                and raw_backend._table is not None
+            ):
                 from sqlalchemy import distinct, select
 
                 table = raw_backend._table

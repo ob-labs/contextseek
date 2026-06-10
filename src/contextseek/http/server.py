@@ -202,7 +202,7 @@ def _parse_watch_paths() -> list[dict[str, str]]:
                 for line in Path(env_file).read_text(encoding="utf-8").splitlines():
                     line = line.strip()
                     if line.startswith("WATCH_PATHS="):
-                        raw = line[len("WATCH_PATHS="):].strip().strip('"').strip("'")
+                        raw = line[len("WATCH_PATHS=") :].strip().strip('"').strip("'")
                         break
             except OSError:
                 pass
@@ -476,7 +476,7 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
                 all_item_ids.add(item.id)
                 has_outlink = False
                 has_refuted_by = False
-                for link in (item.links or []):
+                for link in item.links or []:
                     all_links.append((stage_key, link.target_id))
                     all_target_ids.add(link.target_id)
                     has_outlink = True
@@ -489,6 +489,7 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
 
                 # Pending counts
                 from contextseek.domain.stages import Stage as _Stage
+
                 if item.stage == _Stage.raw and isinstance(item.content, dict):
                     pending_extraction += 1
                 elif item.stage == _Stage.extracted:
@@ -518,7 +519,9 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
         trend_values = [day_counts[lbl] for lbl in day_labels]
 
         # health_score: penalise pending work relative to total
-        pending_ratio = (total_pending_extraction + total_pending_convergence) / max(total_items, 1)
+        pending_ratio = (total_pending_extraction + total_pending_convergence) / max(
+            total_items, 1
+        )
         health_score = max(0, min(100, round(100 - pending_ratio * 50)))
 
         scope_top = sorted(
