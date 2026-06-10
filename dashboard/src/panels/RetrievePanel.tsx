@@ -8,12 +8,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ctx } from "@/lib/ctxClient";
+import { useI18n } from "@/lib/i18n";
 import { useScope } from "@/context/ScopeContext";
 import { useAsyncFn } from "@/lib/utils";
 import type { RetrieveResponse } from "@/lib/types";
 import { HitCard } from "./components/HitCard";
 
 export function RetrievePanel() {
+  const { t } = useI18n();
   const { scope } = useScope();
   const [query, setQuery] = useState("");
   const [k, setK] = useState(10);
@@ -31,7 +33,7 @@ export function RetrievePanel() {
       try {
         filters = JSON.parse(filtersText);
       } catch {
-        setFilterError("filters 不是合法 JSON");
+        setFilterError(t("retrieve.filterInvalid"));
         return;
       }
     }
@@ -43,12 +45,12 @@ export function RetrievePanel() {
       <Card>
         <CardContent className="space-y-4 pt-6">
           <div className="space-y-1.5">
-            <Label htmlFor="q">查询</Label>
+            <Label htmlFor="q">{t("retrieve.query")}</Label>
             <Textarea
               id="q"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="输入自然语言查询…"
+              placeholder={t("retrieve.queryPlaceholder")}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
               }}
@@ -68,7 +70,7 @@ export function RetrievePanel() {
             </div>
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" checked={full} onChange={(e) => setFull(e.target.checked)} />
-              直接取全文 (full)
+              {t("retrieve.full")}
             </label>
             <label className="flex items-center gap-2 text-sm">
               <input
@@ -76,14 +78,14 @@ export function RetrievePanel() {
                 checked={includeDeleted}
                 onChange={(e) => setIncludeDeleted(e.target.checked)}
               />
-              含已删除
+              {t("retrieve.includeDeleted")}
             </label>
             <AsyncButton loading={loading} onClick={submit} disabled={!query.trim()}>
-              <Search className="h-4 w-4" /> 检索
+              <Search className="h-4 w-4" /> {t("retrieve.action")}
             </AsyncButton>
           </div>
           <details className="text-sm">
-            <summary className="cursor-pointer text-muted-foreground">高级：filters (JSON)</summary>
+            <summary className="cursor-pointer text-muted-foreground">{t("retrieve.advanced")}</summary>
             <Textarea
               value={filtersText}
               onChange={(e) => setFiltersText(e.target.value)}
@@ -106,7 +108,7 @@ export function RetrievePanel() {
         loading={loading}
         error={error}
         empty={Boolean(data && data.items.length === 0)}
-        emptyText="没有命中结果"
+        emptyText={t("retrieve.empty")}
       >
         <div className="space-y-3">
           {data?.items.map((hit) => (

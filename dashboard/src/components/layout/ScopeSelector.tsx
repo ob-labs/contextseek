@@ -1,38 +1,47 @@
 import { useEffect, useState } from "react";
 
-import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
+import { ctx } from "@/lib/ctxClient";
 import { useScope } from "@/context/ScopeContext";
 
-/** The only writer of the global scope. Commits on blur / Enter. */
 export function ScopeSelector() {
   const { scope, setScope } = useScope();
-  const [draft, setDraft] = useState(scope);
+  const [options, setOptions] = useState<string[]>([]);
 
-  useEffect(() => setDraft(scope), [scope]);
+  useEffect(() => {
+    ctx
+      .scopes()
+      .then((r) => setOptions(r.scopes))
+      .catch(() => {});
+  }, []);
 
-  const commit = () => {
-    const next = draft.trim();
-    if (next && next !== scope) setScope(next);
-    else setDraft(scope);
-  };
+  // Ensure current scope is always in the list (even if not returned by /scopes yet)
+  const allOptions = options.includes(scope) ? options : [scope, ...options];
 
   return (
     <div className="flex items-center gap-2">
-      <Label htmlFor="ctx-scope" className="text-xs text-muted-foreground">
+      <Label htmlFor="ctx-scope" className="shrink-0 text-xs text-muted-foreground">
         scope
       </Label>
-      <Input
-        id="ctx-scope"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-        }}
-        className="h-8 w-44 font-mono text-xs"
-        spellCheck={false}
-      />
+      <Select value={scope} onValueChange={setScope}>
+        <SelectTrigger id="ctx-scope" className="h-8 w-44 font-mono text-xs">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {allOptions.map((s) => (
+            <SelectItem key={s} value={s} className="font-mono text-xs">
+              {s}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }

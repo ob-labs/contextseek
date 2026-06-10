@@ -3,9 +3,16 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-// Front-end and backend run as separate processes. `vite build` produces the
-// static SPA in dist/; `vite preview` serves it on :3000. The backend API base
-// URL is injected at build time via VITE_CTX_BASE (see src/lib/ctxClient.ts).
+// All known API root segments served by contextseek.http.server.
+// Requests matching this prefix are proxied to the backend (port 8000) so
+// that both `vite dev` and `vite preview` work without setting VITE_CTX_BASE.
+const API_SEGMENTS =
+  "add|retrieve|expand|forget|delete|compact|dream|feedback|upstream|" +
+  "evidence_chain|chain_confidence|skill_tools|skill_context|skill_md|items|" +
+  "overview|global_overview|scopes|config|metrics|seed|health|__desktop";
+const API_PROXY_PATTERN = `^/(${API_SEGMENTS})(/|$|\\?)`;
+const API_PROXY_TARGET = { target: "http://127.0.0.1:8000", changeOrigin: true };
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
@@ -13,7 +20,11 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  server: {
+    proxy: { [API_PROXY_PATTERN]: API_PROXY_TARGET },
+  },
   preview: {
     port: 3000,
+    proxy: { [API_PROXY_PATTERN]: API_PROXY_TARGET },
   },
 });

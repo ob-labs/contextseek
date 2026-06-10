@@ -9,11 +9,13 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useNav } from "@/context/NavContext";
 import { ctx } from "@/lib/ctxClient";
+import { useI18n } from "@/lib/i18n";
 import { useScope } from "@/context/ScopeContext";
 import { errorMessage } from "@/lib/utils";
 import type { SearchHit } from "@/lib/types";
 
 export function HitCard({ hit }: { hit: SearchHit }) {
+  const { t } = useI18n();
   const { scope } = useScope();
   const { navigate } = useNav();
   const [full, setFull] = useState<unknown>(hit.layer === "full" ? hit.content : null);
@@ -25,7 +27,7 @@ export function HitCard({ hit }: { hit: SearchHit }) {
     setError(null);
     try {
       const res = await ctx.expand({ scope, ids: [hit.id] });
-      setFull(res.items[0]?.content ?? "(空)");
+      setFull(res.items[0]?.content ?? t("hit.empty"));
     } catch (err) {
       setError(err);
     } finally {
@@ -47,12 +49,12 @@ export function HitCard({ hit }: { hit: SearchHit }) {
             )}
             <span className="font-mono text-xs text-muted-foreground">{hit.id}</span>
           </div>
-          <p className="text-sm">{hit.summary || "(无摘要)"}</p>
+          <p className="text-sm">{hit.summary || t("hit.noSummary")}</p>
         </div>
         <Button
           variant="ghost"
           size="icon"
-          title="查看溯源"
+          title={t("hit.viewProvenance")}
           onClick={() => navigate("provenance", { itemId: hit.id })}
         >
           <GitGraph className="h-4 w-4" />
@@ -73,7 +75,7 @@ export function HitCard({ hit }: { hit: SearchHit }) {
         <JsonView value={full} />
       ) : (
         <AsyncButton variant="outline" size="sm" loading={loading} onClick={expand}>
-          展开全文
+          {t("hit.expand")}
         </AsyncButton>
       )}
       {error ? <p className="text-xs text-destructive">{errorMessage(error)}</p> : null}

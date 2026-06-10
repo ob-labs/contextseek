@@ -1193,6 +1193,84 @@ class ContextSeek:
         )
         return report
 
+    def list_scopes(self) -> list[str]:
+        """Return a sorted list of all distinct scopes present in storage.
+
+        Works by querying the underlying backend for distinct scope values.
+        Returns an empty list when the backend cannot be introspected.
+        """
+        from contextseek.storage.storage_adapter import SeekVFSStorageAdapter
+
+        adapter = self.adapter
+        scopes: set[str] = set()
+
+        # Resolve the underlying VFS backend (OceanBase, seekdb, file, memory, …)
+        raw_backend = None
+        if isinstance(adapter, SeekVFSStorageAdapter):
+            raw_backend = adapter._resolve_backend(adapter._inner_scheme + "x/y")
+
+        # OceanBase: dedicated scope column → single SQL query
+        try:
+            from contextseek.storage.ob_backend import OceanBaseBackend
+
+            if (
+                isinstance(raw_backend, OceanBaseBackend)
+                and raw_backend._table is not None
+            ):
+                from sqlalchemy import distinct, select
+
+                table = raw_backend._table
+                stmt = select(distinct(table.c["scope"])).where(
+                    table.c["scope"].isnot(None)
+                )
+                with raw_backend._obvector.engine.connect() as conn:
+                    rows = conn.execute(stmt).fetchall()
+                scopes = {str(row[0]) for row in rows if row[0]}
+                return sorted(scopes)
+        except Exception:
+            pass
+
+        # seekdb: get all metadata in batches, extract distinct scope values
+        try:
+            from contextseek.storage.seekdb_backend import SeekDBBackend
+
+            if isinstance(raw_backend, SeekDBBackend):
+                batch_size = 1000
+                offset = 0
+                while True:
+                    result = raw_backend._collection.get(
+                        where=None,
+                        include=["metadatas"],
+                        limit=batch_size,
+                        offset=offset,
+                    )
+                    metas = result.get("metadatas") or []
+                    for meta in metas:
+                        if meta and meta.get("scope"):
+                            scopes.add(str(meta["scope"]))
+                    if len(metas) < batch_size:
+                        break
+                    offset += batch_size
+                return sorted(scopes)
+        except Exception:
+            pass
+
+        # Generic fallback: list all inner refs via VFS and parse scope from URI
+        if isinstance(adapter, SeekVFSStorageAdapter):
+            try:
+                inner_refs = adapter._vfs.ls(adapter._inner_scheme, recursive=True)
+                for fi in inner_refs:
+                    try:
+                        outer_ref = adapter._to_outer(fi.path)
+                        scope, _ = self.resolver.parse_ref(outer_ref)
+                        scopes.add(scope)
+                    except (ValueError, AttributeError):
+                        continue
+            except Exception:
+                pass
+
+        return sorted(scopes)
+
     def overview(self, *, scope: str) -> EvolutionReport:
         """Read-only summary of items in a scope: stages and evolution-style counts.
 
@@ -1511,12 +1589,22 @@ class ContextSeek:
             candidates = self.items(scope=scope, stage=Stage.skill)
 
         if skill_type is not None:
-            candidates = [
-                c
-                for c in candidates
-                if isinstance(c.content, dict)
-                and c.content.get("skill_type") == skill_type
-            ]
+            if skill_type == "prompt":
+                # Include string-content items (no explicit skill_type → implicitly "prompt")
+                # as well as dict-content items explicitly marked "prompt".
+                candidates = [
+                    c
+                    for c in candidates
+                    if not isinstance(c.content, dict)
+                    or c.content.get("skill_type", "prompt") == "prompt"
+                ]
+            else:
+                candidates = [
+                    c
+                    for c in candidates
+                    if isinstance(c.content, dict)
+                    and c.content.get("skill_type") == skill_type
+                ]
 
         return candidates
 

@@ -9,6 +9,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { useMemo } from "react";
 
+import { useI18n } from "@/lib/i18n";
 import type { EvidenceChain, Stage } from "@/lib/types";
 
 const STAGE_COLOR: Record<Stage, string> = {
@@ -93,10 +94,11 @@ function layout(chain: EvidenceChain): { nodes: Node[]; edges: Edge[] } {
 }
 
 export function EvidenceGraph({ chain }: { chain: EvidenceChain }) {
+  const { t } = useI18n();
   const { nodes, edges } = useMemo(() => layout(chain), [chain]);
 
   if (chain.nodes.length === 0) {
-    return <div className="p-6 text-sm text-muted-foreground">该条目没有证据链节点</div>;
+    return <div className="p-6 text-sm text-muted-foreground">{t("evidence.noNodes")}</div>;
   }
 
   return (

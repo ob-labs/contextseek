@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { ctx } from "@/lib/ctxClient";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { useScope } from "@/context/ScopeContext";
 
 /** Polls /health and /overview to show a small live indicator in the topbar. */
 export function HealthBadge() {
+  const { t } = useI18n();
   const { scope } = useScope();
   const [ok, setOk] = useState<boolean | null>(null);
   const [version, setVersion] = useState<string>("");
@@ -38,9 +40,9 @@ export function HealthBadge() {
   return (
     <div className="flex items-center gap-2 text-xs text-muted-foreground" title={`ctx ${version}`}>
       <span className={cn("h-2 w-2 rounded-full", color)} />
-      <span>{ok == null ? "检查中" : ok ? "在线" : "离线"}</span>
+      <span>{ok == null ? t("health.checking") : ok ? t("health.online") : t("health.offline")}</span>
       {total != null && (
-        <span className="font-mono tabular-nums">· {total} 条</span>
+        <span className="font-mono tabular-nums">· {total} {t("health.items")}</span>
       )}
     </div>
   );

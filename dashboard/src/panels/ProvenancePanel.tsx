@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ctx } from "@/lib/ctxClient";
+import { useI18n } from "@/lib/i18n";
 import { useScope } from "@/context/ScopeContext";
 import { useNav } from "@/context/NavContext";
 import { useAsyncFn } from "@/lib/utils";
@@ -18,6 +19,7 @@ import { EvidenceGraph } from "./components/EvidenceGraph";
 import { ItemCard } from "./components/ItemCard";
 
 export function ProvenancePanel({ initialItemId = "" }: { initialItemId?: string }) {
+  const { t } = useI18n();
   const { scope } = useScope();
   const { back, canGoBack } = useNav();
   const [itemId, setItemId] = useState(initialItemId);
@@ -48,7 +50,7 @@ export function ProvenancePanel({ initialItemId = "" }: { initialItemId?: string
       {canGoBack && (
         <Button variant="ghost" size="sm" onClick={back} className="-ml-1">
           <ArrowLeft className="mr-1 h-4 w-4" />
-          返回
+          {t("provenance.back")}
         </Button>
       )}
       <Card>
@@ -59,7 +61,7 @@ export function ProvenancePanel({ initialItemId = "" }: { initialItemId?: string
               id="pv-id"
               value={itemId}
               onChange={(e) => setItemId(e.target.value)}
-              placeholder="粘贴条目 id"
+              placeholder={t("common.pasteItemId")}
               className="font-mono"
               onKeyDown={(e) => {
                 if (e.key === "Enter") inspect();
@@ -78,7 +80,7 @@ export function ProvenancePanel({ initialItemId = "" }: { initialItemId?: string
             />
           </div>
           <AsyncButton loading={chain.loading} onClick={inspect} disabled={!itemId.trim()}>
-            <GitGraph className="h-4 w-4" /> 分析
+            <GitGraph className="h-4 w-4" /> {t("provenance.analyze")}
           </AsyncButton>
         </CardContent>
       </Card>
@@ -87,10 +89,11 @@ export function ProvenancePanel({ initialItemId = "" }: { initialItemId?: string
         {chain.data && (
           <Tabs defaultValue="graph">
             <TabsList>
-              <TabsTrigger value="graph">证据链图</TabsTrigger>
-              <TabsTrigger value="details">详情</TabsTrigger>
+              <TabsTrigger value="graph">{t("provenance.tabGraph")}</TabsTrigger>
+              <TabsTrigger value="details">{t("provenance.tabDetails")}</TabsTrigger>
               <TabsTrigger value="upstream">
-                上游来源{upstream.data ? ` (${upstream.data.items.length})` : ""}
+                {t("provenance.tabUpstream")}
+                {upstream.data ? ` (${upstream.data.items.length})` : ""}
               </TabsTrigger>
             </TabsList>
             <TabsContent value="graph">
@@ -104,7 +107,7 @@ export function ProvenancePanel({ initialItemId = "" }: { initialItemId?: string
                 loading={upstream.loading}
                 error={upstream.error}
                 empty={Boolean(upstream.data && upstream.data.items.length === 0)}
-                emptyText="无上游来源"
+                emptyText={t("provenance.noUpstream")}
               >
                 <div className="space-y-3">
                   {upstream.data?.items.map((item) => (

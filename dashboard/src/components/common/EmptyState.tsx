@@ -1,5 +1,6 @@
 import { Loader2 } from "lucide-react";
 
+import { useI18n } from "@/lib/i18n";
 import { errorMessage } from "@/lib/utils";
 
 /** Unified loading / error / empty display for panels. */
@@ -7,7 +8,7 @@ export function EmptyState({
   loading,
   error,
   empty,
-  emptyText = "暂无数据",
+  emptyText,
   children,
 }: {
   loading?: boolean;
@@ -16,10 +17,11 @@ export function EmptyState({
   emptyText?: string;
   children?: React.ReactNode;
 }) {
+  const { t } = useI18n();
   if (loading) {
     return (
       <div className="flex items-center gap-2 p-6 text-sm text-muted-foreground">
-        <Loader2 className="h-4 w-4 animate-spin" /> 加载中…
+        <Loader2 className="h-4 w-4 animate-spin" /> {t("common.loading")}
       </div>
     );
   }
@@ -31,7 +33,7 @@ export function EmptyState({
     );
   }
   if (empty) {
-    return <div className="p-6 text-sm text-muted-foreground">{emptyText}</div>;
+    return <div className="p-6 text-sm text-muted-foreground">{emptyText ?? t("common.empty")}</div>;
   }
   return <>{children}</>;
 }

@@ -109,6 +109,10 @@ class SkillContextRequest(BaseModel):
     k: int = 5
 
 
+class SkillMdRequest(BaseModel):
+    scope: str
+
+
 class ItemsRequest(BaseModel):
     scope: str
     stage: str | None = None
@@ -128,8 +132,12 @@ _API_ROOT_SEGMENTS: set[str] = {
     "chain_confidence",
     "skill_tools",
     "skill_context",
+    "skill_md",
     "items",
     "overview",
+    "global_overview",
+    "scopes",
+    "config",
     "metrics",
     "seed",
     "health",
@@ -175,6 +183,41 @@ def _dashboard_dist_dir() -> Path | None:
         if (c / "index.html").is_file():
             return c
     return None
+
+
+def _parse_watch_paths() -> list[dict[str, str]]:
+    """Parse WATCH_PATHS setting into a list of {path, scope} dicts.
+
+    Reads from the ``WATCH_PATHS`` environment variable first (populated by the
+    loaded .env file), then falls back to scanning the resolved config file
+    directly.  Format: ``path1:scope1,path2:scope2``.
+    """
+    raw = os.environ.get("WATCH_PATHS", "").strip()
+    if not raw:
+        from contextseek.config.settings import _get_default_env_file
+
+        env_file = _get_default_env_file()
+        if env_file:
+            try:
+                for line in Path(env_file).read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line.startswith("WATCH_PATHS="):
+                        raw = line[len("WATCH_PATHS=") :].strip().strip('"').strip("'")
+                        break
+            except OSError:
+                pass
+
+    if not raw:
+        return []
+
+    results: list[dict[str, str]] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if ":" in entry:
+            path_part, scope_part = entry.split(":", 1)
+            expanded = str(Path(path_part.strip()).expanduser())
+            results.append({"path": expanded, "scope": scope_part.strip()})
+    return results
 
 
 def create_app(client: ContextSeek | None = None) -> FastAPI:
@@ -341,6 +384,18 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
         context = ctx.skill_context(req.scope, query=req.query, k=req.k)
         return {"context": context}
 
+    @app.post("/skill_md")
+    async def skill_md(req: SkillMdRequest) -> dict[str, Any]:
+        from contextseek.domain.skill_executor import SkillExporter
+
+        exporter = SkillExporter()
+        skills = ctx.skills(req.scope, skill_type="prompt")
+        result = [
+            {"name": s.summary or s.id, "content": exporter.to_hermes_skill_md(s)}
+            for s in skills
+        ]
+        return {"skills": result}
+
     @app.post("/items")
     async def list_items(req: ItemsRequest) -> dict[str, Any]:
         from contextseek.domain.stages import Stage
@@ -358,6 +413,188 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
             "pending_extraction": report.pending_extraction,
             "pending_convergence": report.pending_convergence,
             "distill_candidates": report.distill_candidates,
+        }
+
+    @app.get("/global_overview")
+    async def global_overview() -> dict[str, Any]:
+        import datetime
+
+        STAGES = ["raw", "extracted", "knowledge", "skill"]
+
+        seen_scopes: list[str] = ctx.list_scopes()
+
+        # Single pass: load all items across all scopes
+        total_items = 0
+        total_pending_extraction = 0
+        total_pending_convergence = 0
+        stage_distribution: dict[str, int] = {}
+        scope_counts: dict[str, int] = {}
+
+        today = datetime.date.today()
+        day_labels: list[str] = []
+        day_counts: dict[str, int] = {}
+        for offset in range(6, -1, -1):
+            d = today - datetime.timedelta(days=offset)
+            lbl = d.strftime("%m-%d")
+            day_labels.append(lbl)
+            day_counts[lbl] = 0
+
+        # item_id → stage string (for heatmap link resolution)
+        item_stage_map: dict[str, str] = {}
+        # deferred links: (source_stage, target_id)
+        all_links: list[tuple[str, str]] = []
+
+        # Risk metrics accumulators
+        # conflict: scope → count of items that have at least one refuted_by link
+        scope_conflict_counts: dict[str, int] = {}
+        # orphan: collect all item ids and all referenced target ids
+        all_item_ids: set[str] = set()
+        all_target_ids: set[str] = set()
+        items_with_outlinks: set[str] = set()
+
+        for scope_str in seen_scopes:
+            try:
+                scope_items = ctx.items(scope=scope_str)
+            except Exception:
+                scope_counts[scope_str] = 0
+                continue
+
+            pending_extraction = 0
+            pending_convergence = 0
+            scope_total = 0
+            scope_conflicts = 0
+
+            for item in scope_items:
+                if item.is_deleted:
+                    continue
+                scope_total += 1
+                stage_key = item.stage.value
+                stage_distribution[stage_key] = stage_distribution.get(stage_key, 0) + 1
+
+                # Heatmap: record stage and collect outbound links
+                item_stage_map[item.id] = stage_key
+                all_item_ids.add(item.id)
+                has_outlink = False
+                has_refuted_by = False
+                for link in item.links or []:
+                    all_links.append((stage_key, link.target_id))
+                    all_target_ids.add(link.target_id)
+                    has_outlink = True
+                    if link.relation == "refuted_by":
+                        has_refuted_by = True
+                if has_outlink:
+                    items_with_outlinks.add(item.id)
+                if has_refuted_by:
+                    scope_conflicts += 1
+
+                # Pending counts
+                from contextseek.domain.stages import Stage as _Stage
+
+                if item.stage == _Stage.raw and isinstance(item.content, dict):
+                    pending_extraction += 1
+                elif item.stage == _Stage.extracted:
+                    pending_convergence += 1
+
+                # Trend
+                if item.created_at:
+                    try:
+                        ts = item.created_at
+                        if isinstance(ts, str):
+                            item_date = datetime.date.fromisoformat(ts[:10])
+                        else:
+                            item_date = ts.date() if hasattr(ts, "date") else None
+                        if item_date is not None:
+                            lbl = item_date.strftime("%m-%d")
+                            if lbl in day_counts:
+                                day_counts[lbl] += 1
+                    except (ValueError, AttributeError):
+                        pass
+
+            scope_counts[scope_str] = scope_total
+            scope_conflict_counts[scope_str] = scope_conflicts
+            total_items += scope_total
+            total_pending_extraction += pending_extraction
+            total_pending_convergence += pending_convergence
+
+        trend_values = [day_counts[lbl] for lbl in day_labels]
+
+        # health_score: penalise pending work relative to total
+        pending_ratio = (total_pending_extraction + total_pending_convergence) / max(
+            total_items, 1
+        )
+        health_score = max(0, min(100, round(100 - pending_ratio * 50)))
+
+        scope_top = sorted(
+            [{"label": s, "value": v} for s, v in scope_counts.items()],
+            key=lambda x: x["value"],
+            reverse=True,
+        )[:10]
+
+        # Build stage×stage heatmap matrix (row=source stage, col=target stage)
+        stage_idx = {s: i for i, s in enumerate(STAGES)}
+        n = len(STAGES)
+        matrix = [[0] * n for _ in range(n)]
+        for src_stage, tgt_id in all_links:
+            tgt_stage = item_stage_map.get(tgt_id)
+            if tgt_stage and src_stage in stage_idx and tgt_stage in stage_idx:
+                matrix[stage_idx[src_stage]][stage_idx[tgt_stage]] += 1
+
+        # Risk 1: top conflict subject — scope with the most refuted_by links
+        top_conflict_scope: str | None = None
+        top_conflict_count = 0
+        for scope_str, cnt in scope_conflict_counts.items():
+            if cnt > top_conflict_count:
+                top_conflict_count = cnt
+                top_conflict_scope = scope_str
+        conflict_subject = (
+            f"{top_conflict_scope} ({top_conflict_count})"
+            if top_conflict_scope and top_conflict_count > 0
+            else None
+        )
+
+        # Risk 2: orphan ratio — items with neither outgoing nor incoming links
+        truly_orphaned = all_item_ids - items_with_outlinks - all_target_ids
+        orphan_count = len(truly_orphaned)
+        orphan_ratio = round(orphan_count / max(total_items, 1), 3)
+
+        # Risk 3: suggest compact — extracted backlog is large enough to warrant compaction
+        suggest_compact = (
+            total_pending_convergence >= 10
+            or total_pending_convergence / max(total_items, 1) >= 0.3
+        )
+
+        return {
+            "total_items": total_items,
+            "health_score": health_score,
+            "active_scopes": len(seen_scopes),
+            "stage_distribution": stage_distribution,
+            "scope_top": scope_top,
+            "trend": {"labels": day_labels, "values": trend_values},
+            "heatmap": {"stages": STAGES, "matrix": matrix},
+            "risk_conflict_subject": conflict_subject,
+            "risk_orphan_ratio": orphan_ratio,
+            "risk_suggest_compact": suggest_compact,
+        }
+
+    @app.get("/scopes")
+    async def list_scopes() -> dict[str, Any]:
+        return {"scopes": ctx.list_scopes()}
+
+    @app.get("/config")
+    async def get_config() -> dict[str, Any]:
+        from contextseek.config.settings import ContextSeekSettings, LifecycleSettings
+
+        s = ContextSeekSettings()
+        lc = LifecycleSettings()
+        return {
+            "storage_backend": s.storage.backend,
+            "llm_model": s.llm.model or s.llm.provider,
+            "embedding_model": s.embedding.model or s.embedding.provider,
+            "default_scope": s.default_scope,
+            "version": PACKAGE_VERSION,
+            "auto_sync": lc.auto_compact,
+            "lifecycle_interval_seconds": lc.interval_seconds,
+            "watch_paths": _parse_watch_paths(),
         }
 
     @app.get("/metrics")

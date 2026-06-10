@@ -1,0 +1,680 @@
+/* Lightweight i18n — no external deps. A flat key → string dictionary per
+ * language, a context Provider, and a `useI18n()` hook exposing `t(key, vars)`.
+ * Language is persisted to localStorage and defaults to zh-CN. */
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+
+export type Lang = "zh" | "en" | "ja";
+
+export const LANG_OPTIONS: { value: Lang; label: string }[] = [
+  { value: "zh", label: "中文" },
+  { value: "en", label: "English" },
+  { value: "ja", label: "日本語" },
+];
+
+const STORAGE_KEY = "ctx.lang";
+const DEFAULT_LANG: Lang = "zh";
+
+const HTML_LANG: Record<Lang, string> = {
+  zh: "zh-CN",
+  en: "en",
+  ja: "ja",
+};
+
+type Dict = Record<string, string>;
+
+const zh: Dict = {
+  // app
+  "app.title": "ContextSeek",
+  "app.subtitle": "语义记忆控制台",
+
+  // nav labels + hints
+  "nav.overview": "概览",
+  "nav.overview.hint": "资产全景与阶段分布",
+  "nav.retrieve": "检索",
+  "nav.retrieve.hint": "语义检索 + 展开全文",
+  "nav.browse": "浏览",
+  "nav.browse.hint": "按 scope / 阶段浏览记忆",
+  "nav.write": "写入",
+  "nav.write.hint": "写入一条上下文",
+  "nav.evolution": "演化",
+  "nav.evolution.hint": "compact / dream",
+  "nav.provenance": "溯源图谱",
+  "nav.provenance.hint": "证据链 DAG 与派生回溯",
+  "nav.ingress": "接入层",
+  "nav.ingress.hint": "DataPlug 接入源与同步状态",
+  "nav.skills": "Skills",
+  "nav.skills.hint": "已蒸馏技能与导出",
+  "nav.settings": "设置",
+  "nav.settings.hint": "连接 / 模型 / 系统",
+
+  // topbar
+  "topbar.lang": "语言",
+  "topbar.theme.toLight": "切换为浅色",
+  "topbar.theme.toDark": "切换为深色",
+  "health.checking": "检查中",
+  "health.online": "在线",
+  "health.offline": "离线",
+  "health.items": "条",
+  "scope.label": "scope",
+
+  // common
+  "common.loading": "加载中…",
+  "common.empty": "暂无数据",
+  "common.none": "无",
+  "common.cancel": "取消",
+  "common.pasteItemId": "粘贴条目 id",
+
+  // retrieve
+  "retrieve.query": "查询",
+  "retrieve.queryPlaceholder": "输入自然语言查询…",
+  "retrieve.full": "直接取全文 (full)",
+  "retrieve.includeDeleted": "含已删除",
+  "retrieve.action": "检索",
+  "retrieve.advanced": "高级：filters (JSON)",
+  "retrieve.filterInvalid": "filters 不是合法 JSON",
+  "retrieve.empty": "没有命中结果",
+
+  // hit card
+  "hit.noSummary": "(无摘要)",
+  "hit.viewProvenance": "查看溯源",
+  "hit.expand": "展开全文",
+  "hit.empty": "(空)",
+
+  // browse
+  "browse.allStages": "全部阶段",
+  "browse.refresh": "刷新",
+  "browse.seed": "填充样例数据",
+  "browse.count": "{n} 条",
+  "browse.empty": "该 scope 下暂无条目",
+
+  // item actions
+  "item.useful": "👍 有用",
+  "item.useless": "👎 没用",
+  "item.forget": "忘记 (软删)",
+  "item.delete": "删除",
+  "item.confirmDeleteTitle": "确认硬删除？",
+  "item.confirmDeleteDesc": "将永久删除条目 {id}，不可恢复。",
+  "item.propagate": "级联删除派生条目 (propagate)",
+  "item.confirmDelete": "确认删除",
+  "item.viewProvenance": "查看溯源",
+
+  // write
+  "write.content": "内容",
+  "write.asJson": "按 JSON 解析",
+  "write.contentJsonPlaceholder": '{"key": "value"}',
+  "write.contentTextPlaceholder": "要写入的文本…",
+  "write.tags": "tags (逗号分隔)",
+  "write.jsonInvalid": "content 不是合法 JSON",
+  "write.action": "写入 scope「{scope}」",
+  "write.written": "已写入：",
+  "write.goBrowse": "去浏览",
+  "write.goProvenance": "看溯源",
+
+  // evolution
+  "evolution.title": "知识演化",
+  "evolution.desc": "对 scope「{scope}」触发 compact（去重/合并/演化）或 dream（LLM 知识精炼）。",
+  "evolution.dryRun": "dry-run（仅预览，不落库）",
+  "evolution.compact": "Compact",
+  "evolution.dream": "Dream",
+  "evolution.compactResult": "Compact 结果",
+  "evolution.dreamResult": "Dream 结果",
+
+  // provenance
+  "provenance.back": "返回",
+  "provenance.depth": "max_depth",
+  "provenance.analyze": "分析",
+  "provenance.tabGraph": "证据链图",
+  "provenance.tabDetails": "详情",
+  "provenance.tabUpstream": "上游来源",
+  "provenance.noUpstream": "无上游来源",
+
+  // evidence details
+  "evidence.hasConflicts": "存在冲突",
+  "evidence.needsReverify": "需重新验证",
+  "evidence.brokenLinks": "断链",
+  "evidence.criticalPath": "关键路径",
+  "evidence.conflicts": "冲突",
+  "evidence.noNodes": "该条目没有证据链节点",
+
+  // overview
+  "overview.kpi.total": "总条目",
+  "overview.kpi.health": "健康分",
+  "overview.kpi.activeScopes": "活跃 Scope",
+  "overview.funnel": "Stage 漏斗",
+  "overview.stageShare": "Stage 占比",
+  "overview.scopeTop": "Scope Top5",
+  "overview.trend": "近 7 日新增条目",
+  "overview.scopeGrowth": "各 scope 增长对比",
+  "overview.evolutionOutput": "演进产出",
+  "overview.heatmap": "全局关系热区",
+  "overview.heatmapMock": "关系图预览(mock)",
+  "overview.heatmap.axis": "行=来源 · 列=目标",
+  "overview.risks": "风险提示",
+  "overview.risk.conflictSubject": "高冲突 subject",
+  "overview.risk.orphanRatio": "孤儿项比例",
+  "overview.risk.suggestCompact": "建议 compact",
+  "overview.risk.suggestCompactValue": "2 个 scope",
+  "overview.risk.yes": "是",
+  "overview.risk.no": "否",
+
+  // ingress
+  "ingress.dataplug": "接入层 DataPlug",
+  "ingress.flow.input": "接入层 DataPlug(多源输入)",
+  "ingress.flow.normalize": "↓ 标准化",
+  "ingress.flow.item": "ContextItem + Provenance + Link",
+  "ingress.flow.toPipeline": "↓ 进入演进流水线",
+  "ingress.flow.stages": "raw → extracted → knowledge → skill",
+  "ingress.statusOverview": "接入状态总览",
+  "ingress.status.totalItems": "当前 scope 条目",
+  "ingress.status.watchPaths": "监听路径数",
+  "ingress.status.latestWrite": "最新写入",
+  "ingress.status.autoSync": "自动同步",
+  "ingress.watchPaths": "监听路径配置",
+  "ingress.watchPaths.empty": "未配置监听路径",
+  "ingress.sourceConfig": "接入源配置",
+  "ingress.throughput": "近 7 日每日接入量",
+  "ingress.contribution": "来源贡献度",
+  "ingress.config": "配置项",
+  "ingress.config.defaultScope": "默认写入 scope",
+  "ingress.config.lifecycle": "生命周期间隔",
+  "ingress.config.autoSync": "自动同步",
+  "ingress.events": "接入事件日志",
+  "ingress.events.empty": "当前 scope 暂无条目",
+  "ingress.tag.ide": "IDE",
+  "ingress.tag.kb": "知识库",
+  "ingress.tag.text": "文本",
+  "ingress.tag.file": "文件",
+  "ingress.tag.web": "网页",
+  "ingress.tag.session": "会话",
+  "ingress.tag.retrieval": "检索",
+  "ingress.source.note": "笔记",
+
+  // skills
+  "skills.typeShare": "skill 类型占比",
+  "skills.type": "skill 类型",
+  "skills.distilled": "已蒸馏技能",
+  "skills.export": "导出格式",
+  "skills.export.download": "下载",
+  "skills.export.noSkills": "暂无技能",
+  "skills.systemPrompt": "注入 Agent 的 Prompt 片段",
+  "skills.systemPrompt.hint": "将 prompt 类型的 skill 格式化为 <available_skills> 块，复制后粘贴到你的 LLM 系统提示中，LLM 即可感知并遵循这些技能规范",
+  "skills.systemPrompt.copy": "复制",
+  "skills.systemPrompt.copied": "已复制",
+  "skills.systemPrompt.empty": "暂无 prompt 类型技能（蒸馏后自动出现）",
+  "skills.detail.description": "描述",
+  "skills.detail.body": "内容",
+  "skills.detail.parameters": "参数 Schema",
+  "skills.detail.inputSchema": "Input Schema",
+  "skills.detail.confidence": "置信度",
+  "skills.detail.source": "来源",
+  "skills.detail.createdAt": "创建时间",
+
+  // settings
+  "settings.connection": "后端连接",
+  "settings.connection.desc": "daemon 的访问地址。",
+  "settings.model.desc": "推理 / 嵌入模型与默认 scope、监听路径。",
+  "settings.system.desc": "后台 daemon 与自动同步的运行状态。",
+  "settings.conn.mode": "模式",
+  "settings.conn.modeValue": "local daemon",
+  "settings.conn.addr": "地址",
+  "settings.conn.auth": "鉴权",
+  "settings.conn.authValue": "token (web only)",
+  "settings.model": "模型与参数",
+  "settings.system": "系统控制",
+  "settings.sys.daemon": "daemon",
+  "settings.sys.daemonValue": "running",
+  "settings.sys.autoSync": "auto sync",
+  "settings.sys.autoSyncValue": "on",
+  "settings.sys.autoSyncOff": "off",
+  "settings.model.watchPaths": "监听路径",
+  "settings.refresh": "刷新",
+  "settings.loadError": "加载失败",
+};
+
+const en: Dict = {
+  "app.title": "ContextSeek",
+  "app.subtitle": "Semantic Memory Console",
+
+  "nav.overview": "Overview",
+  "nav.overview.hint": "Asset landscape & stage distribution",
+  "nav.retrieve": "Retrieve",
+  "nav.retrieve.hint": "Semantic search + full-text expand",
+  "nav.browse": "Browse",
+  "nav.browse.hint": "Browse memory by scope / stage",
+  "nav.write": "Write",
+  "nav.write.hint": "Write one context item",
+  "nav.evolution": "Evolution",
+  "nav.evolution.hint": "compact / dream",
+  "nav.provenance": "Provenance",
+  "nav.provenance.hint": "Evidence-chain DAG & derivation trace",
+  "nav.ingress": "Ingress",
+  "nav.ingress.hint": "DataPlug sources & sync status",
+  "nav.skills": "Skills",
+  "nav.skills.hint": "Distilled skills & export",
+  "nav.settings": "Settings",
+  "nav.settings.hint": "Connection / model / system",
+
+  "topbar.lang": "Language",
+  "topbar.theme.toLight": "Switch to light",
+  "topbar.theme.toDark": "Switch to dark",
+  "health.checking": "Checking",
+  "health.online": "Online",
+  "health.offline": "Offline",
+  "health.items": "items",
+  "scope.label": "scope",
+
+  "common.loading": "Loading…",
+  "common.empty": "No data",
+  "common.none": "None",
+  "common.cancel": "Cancel",
+  "common.pasteItemId": "Paste an item id",
+
+  "retrieve.query": "Query",
+  "retrieve.queryPlaceholder": "Enter a natural-language query…",
+  "retrieve.full": "Fetch full text (full)",
+  "retrieve.includeDeleted": "Include deleted",
+  "retrieve.action": "Retrieve",
+  "retrieve.advanced": "Advanced: filters (JSON)",
+  "retrieve.filterInvalid": "filters is not valid JSON",
+  "retrieve.empty": "No matches",
+
+  "hit.noSummary": "(no summary)",
+  "hit.viewProvenance": "View provenance",
+  "hit.expand": "Expand full text",
+  "hit.empty": "(empty)",
+
+  "browse.allStages": "All stages",
+  "browse.refresh": "Refresh",
+  "browse.seed": "Seed sample data",
+  "browse.count": "{n} items",
+  "browse.empty": "No items in this scope",
+
+  "item.useful": "👍 Useful",
+  "item.useless": "👎 Not useful",
+  "item.forget": "Forget (soft)",
+  "item.delete": "Delete",
+  "item.confirmDeleteTitle": "Confirm hard delete?",
+  "item.confirmDeleteDesc": "Permanently deletes item {id}. This cannot be undone.",
+  "item.propagate": "Cascade delete derived items (propagate)",
+  "item.confirmDelete": "Confirm delete",
+  "item.viewProvenance": "View provenance",
+
+  "write.content": "Content",
+  "write.asJson": "Parse as JSON",
+  "write.contentJsonPlaceholder": '{"key": "value"}',
+  "write.contentTextPlaceholder": "Text to write…",
+  "write.tags": "tags (comma-separated)",
+  "write.jsonInvalid": "content is not valid JSON",
+  "write.action": "Write to scope \"{scope}\"",
+  "write.written": "Written:",
+  "write.goBrowse": "Browse",
+  "write.goProvenance": "Provenance",
+
+  "evolution.title": "Knowledge Evolution",
+  "evolution.desc": "Trigger compact (dedup/merge/evolve) or dream (LLM distillation) on scope \"{scope}\".",
+  "evolution.dryRun": "dry-run (preview only, no writes)",
+  "evolution.compact": "Compact",
+  "evolution.dream": "Dream",
+  "evolution.compactResult": "Compact result",
+  "evolution.dreamResult": "Dream result",
+
+  "provenance.back": "Back",
+  "provenance.depth": "max_depth",
+  "provenance.analyze": "Analyze",
+  "provenance.tabGraph": "Evidence graph",
+  "provenance.tabDetails": "Details",
+  "provenance.tabUpstream": "Upstream",
+  "provenance.noUpstream": "No upstream sources",
+
+  "evidence.hasConflicts": "Has conflicts",
+  "evidence.needsReverify": "Needs reverification",
+  "evidence.brokenLinks": "Broken links",
+  "evidence.criticalPath": "Critical path",
+  "evidence.conflicts": "Conflicts",
+  "evidence.noNodes": "This item has no evidence-chain nodes",
+
+  "overview.kpi.total": "Total items",
+  "overview.kpi.health": "Health score",
+  "overview.kpi.activeScopes": "Active scopes",
+  "overview.funnel": "Stage funnel",
+  "overview.stageShare": "Stage share",
+  "overview.scopeTop": "Scope Top 5",
+  "overview.trend": "New items (last 7 days)",
+  "overview.scopeGrowth": "Growth by scope",
+  "overview.evolutionOutput": "Evolution output",
+  "overview.heatmap": "Global relation heatmap",
+  "overview.heatmapMock": "Graph preview (mock)",
+  "overview.heatmap.axis": "Row=source · Col=target",
+  "overview.risks": "Risk alerts",
+  "overview.risk.conflictSubject": "Top-conflict subject",
+  "overview.risk.orphanRatio": "Orphan ratio",
+  "overview.risk.suggestCompact": "Compact suggested",
+  "overview.risk.suggestCompactValue": "2 scopes",
+  "overview.risk.yes": "Yes",
+  "overview.risk.no": "No",
+
+  "ingress.dataplug": "DataPlug Ingress",
+  "ingress.flow.input": "DataPlug ingress (multi-source input)",
+  "ingress.flow.normalize": "↓ normalize",
+  "ingress.flow.item": "ContextItem + Provenance + Link",
+  "ingress.flow.toPipeline": "↓ into the evolution pipeline",
+  "ingress.flow.stages": "raw → extracted → knowledge → skill",
+  "ingress.statusOverview": "Ingress status",
+  "ingress.status.totalItems": "Items in scope",
+  "ingress.status.watchPaths": "Watch paths",
+  "ingress.status.latestWrite": "Latest write",
+  "ingress.status.autoSync": "Auto sync",
+  "ingress.watchPaths": "Watch path config",
+  "ingress.watchPaths.empty": "No watch paths configured",
+  "ingress.sourceConfig": "Source config",
+  "ingress.throughput": "Daily ingest (last 7 days)",
+  "ingress.contribution": "Source contribution",
+  "ingress.config": "Settings",
+  "ingress.config.defaultScope": "Default write scope",
+  "ingress.config.lifecycle": "Lifecycle interval",
+  "ingress.config.autoSync": "Auto sync",
+  "ingress.events": "Ingress event log",
+  "ingress.events.empty": "No items in this scope yet",
+  "ingress.tag.ide": "IDE",
+  "ingress.tag.kb": "Knowledge base",
+  "ingress.tag.text": "Text",
+  "ingress.tag.file": "File",
+  "ingress.tag.web": "Web",
+  "ingress.tag.session": "Session",
+  "ingress.tag.retrieval": "Retrieval",
+  "ingress.source.note": "Notes",
+
+  "skills.typeShare": "Skill type share",
+  "skills.type": "Skill type",
+  "skills.distilled": "Distilled skills",
+  "skills.export": "Export formats",
+  "skills.export.download": "Download",
+  "skills.export.noSkills": "No skills yet",
+  "skills.systemPrompt": "Agent Prompt Injection",
+  "skills.systemPrompt.hint": "Formats your prompt-type skills as an <available_skills> block. Paste into your LLM system prompt so the model knows about and follows these skill specifications.",
+  "skills.systemPrompt.copy": "Copy",
+  "skills.systemPrompt.copied": "Copied",
+  "skills.systemPrompt.empty": "No prompt-type skills yet (appears after distillation)",
+  "skills.detail.description": "Description",
+  "skills.detail.body": "Body",
+  "skills.detail.parameters": "Parameters Schema",
+  "skills.detail.inputSchema": "Input Schema",
+  "skills.detail.confidence": "Confidence",
+  "skills.detail.source": "Source",
+  "skills.detail.createdAt": "Created at",
+
+  "settings.connection": "Backend connection",
+  "settings.connection.desc": "Address of the daemon HTTP server.",
+  "settings.model.desc": "Inference / embedding models, default scope and watch paths.",
+  "settings.system.desc": "Runtime status of the background daemon and auto sync.",
+  "settings.conn.mode": "Mode",
+  "settings.conn.modeValue": "local daemon",
+  "settings.conn.addr": "Address",
+  "settings.conn.auth": "Auth",
+  "settings.conn.authValue": "token (web only)",
+  "settings.model": "Model & parameters",
+  "settings.system": "System control",
+  "settings.sys.daemon": "daemon",
+  "settings.sys.daemonValue": "running",
+  "settings.sys.autoSync": "auto sync",
+  "settings.sys.autoSyncValue": "on",
+  "settings.sys.autoSyncOff": "off",
+  "settings.model.watchPaths": "Watch paths",
+  "settings.refresh": "Refresh",
+  "settings.loadError": "Load failed",
+};
+
+const ja: Dict = {
+  "app.title": "ContextSeek",
+  "app.subtitle": "セマンティックメモリコンソール",
+
+  "nav.overview": "概要",
+  "nav.overview.hint": "アセット全体像とステージ分布",
+  "nav.retrieve": "検索",
+  "nav.retrieve.hint": "セマンティック検索 + 全文展開",
+  "nav.browse": "閲覧",
+  "nav.browse.hint": "scope / ステージでメモリを閲覧",
+  "nav.write": "書き込み",
+  "nav.write.hint": "コンテキストを1件書き込む",
+  "nav.evolution": "進化",
+  "nav.evolution.hint": "compact / dream",
+  "nav.provenance": "由来グラフ",
+  "nav.provenance.hint": "証拠チェーン DAG と派生トレース",
+  "nav.ingress": "イングレス",
+  "nav.ingress.hint": "DataPlug ソースと同期状態",
+  "nav.skills": "Skills",
+  "nav.skills.hint": "蒸留済みスキルとエクスポート",
+  "nav.settings": "設定",
+  "nav.settings.hint": "接続 / モデル / システム",
+
+  "topbar.lang": "言語",
+  "topbar.theme.toLight": "ライトモードに切り替え",
+  "topbar.theme.toDark": "ダークモードに切り替え",
+  "health.checking": "確認中",
+  "health.online": "オンライン",
+  "health.offline": "オフライン",
+  "health.items": "件",
+  "scope.label": "scope",
+
+  "common.loading": "読み込み中…",
+  "common.empty": "データなし",
+  "common.none": "なし",
+  "common.cancel": "キャンセル",
+  "common.pasteItemId": "項目 ID を貼り付け",
+
+  "retrieve.query": "クエリ",
+  "retrieve.queryPlaceholder": "自然言語クエリを入力…",
+  "retrieve.full": "全文を取得 (full)",
+  "retrieve.includeDeleted": "削除済みを含む",
+  "retrieve.action": "検索",
+  "retrieve.advanced": "詳細: filters (JSON)",
+  "retrieve.filterInvalid": "filters は有効な JSON ではありません",
+  "retrieve.empty": "一致する結果がありません",
+
+  "hit.noSummary": "(要約なし)",
+  "hit.viewProvenance": "由来を表示",
+  "hit.expand": "全文を展開",
+  "hit.empty": "(空)",
+
+  "browse.allStages": "すべてのステージ",
+  "browse.refresh": "更新",
+  "browse.seed": "サンプルデータを投入",
+  "browse.count": "{n} 件",
+  "browse.empty": "この scope に項目はありません",
+
+  "item.useful": "👍 役に立った",
+  "item.useless": "👎 役に立たなかった",
+  "item.forget": "忘れる (ソフト削除)",
+  "item.delete": "削除",
+  "item.confirmDeleteTitle": "完全削除を確認しますか？",
+  "item.confirmDeleteDesc": "項目 {id} を完全に削除します。元に戻せません。",
+  "item.propagate": "派生項目を連鎖削除 (propagate)",
+  "item.confirmDelete": "削除を確認",
+  "item.viewProvenance": "由来を表示",
+
+  "write.content": "内容",
+  "write.asJson": "JSON として解析",
+  "write.contentJsonPlaceholder": '{"key": "value"}',
+  "write.contentTextPlaceholder": "書き込むテキスト…",
+  "write.tags": "tags (カンマ区切り)",
+  "write.jsonInvalid": "content は有効な JSON ではありません",
+  "write.action": "scope「{scope}」に書き込み",
+  "write.written": "書き込み完了:",
+  "write.goBrowse": "閲覧へ",
+  "write.goProvenance": "由来を見る",
+
+  "evolution.title": "ナレッジ進化",
+  "evolution.desc": "scope「{scope}」で compact（重複排除/マージ/進化）または dream（LLM 蒸留）を実行します。",
+  "evolution.dryRun": "dry-run（プレビューのみ、書き込みなし）",
+  "evolution.compact": "Compact",
+  "evolution.dream": "Dream",
+  "evolution.compactResult": "Compact 結果",
+  "evolution.dreamResult": "Dream 結果",
+
+  "provenance.back": "戻る",
+  "provenance.depth": "max_depth",
+  "provenance.analyze": "分析",
+  "provenance.tabGraph": "証拠チェーン図",
+  "provenance.tabDetails": "詳細",
+  "provenance.tabUpstream": "上流ソース",
+  "provenance.noUpstream": "上流ソースなし",
+
+  "evidence.hasConflicts": "競合あり",
+  "evidence.needsReverify": "再検証が必要",
+  "evidence.brokenLinks": "リンク切れ",
+  "evidence.criticalPath": "クリティカルパス",
+  "evidence.conflicts": "競合",
+  "evidence.noNodes": "この項目には証拠チェーンノードがありません",
+
+  "overview.kpi.total": "総項目数",
+  "overview.kpi.health": "ヘルススコア",
+  "overview.kpi.activeScopes": "アクティブ Scope",
+  "overview.funnel": "ステージファネル",
+  "overview.stageShare": "ステージ比率",
+  "overview.scopeTop": "Scope Top 5",
+  "overview.trend": "直近7日間の新規項目",
+  "overview.scopeGrowth": "scope 別の成長比較",
+  "overview.evolutionOutput": "進化の出力",
+  "overview.heatmap": "グローバル関係ヒートマップ",
+  "overview.heatmapMock": "グラフプレビュー (mock)",
+  "overview.heatmap.axis": "行=ソース · 列=ターゲット",
+  "overview.risks": "リスクアラート",
+  "overview.risk.conflictSubject": "競合の多い subject",
+  "overview.risk.orphanRatio": "孤立項目の比率",
+  "overview.risk.suggestCompact": "compact を推奨",
+  "overview.risk.suggestCompactValue": "2 scope",
+  "overview.risk.yes": "はい",
+  "overview.risk.no": "いいえ",
+
+  "ingress.dataplug": "DataPlug イングレス",
+  "ingress.flow.input": "DataPlug イングレス (マルチソース入力)",
+  "ingress.flow.normalize": "↓ 正規化",
+  "ingress.flow.item": "ContextItem + Provenance + Link",
+  "ingress.flow.toPipeline": "↓ 進化パイプラインへ",
+  "ingress.flow.stages": "raw → extracted → knowledge → skill",
+  "ingress.statusOverview": "イングレス状態",
+  "ingress.status.totalItems": "scope 内の項目",
+  "ingress.status.watchPaths": "監視パス数",
+  "ingress.status.latestWrite": "最新書き込み",
+  "ingress.status.autoSync": "自動同期",
+  "ingress.watchPaths": "監視パス設定",
+  "ingress.watchPaths.empty": "監視パスが設定されていません",
+  "ingress.sourceConfig": "ソース設定",
+  "ingress.throughput": "直近7日間の日別取り込み数",
+  "ingress.contribution": "ソース貢献度",
+  "ingress.config": "設定",
+  "ingress.config.defaultScope": "デフォルト書き込み scope",
+  "ingress.config.lifecycle": "ライフサイクル間隔",
+  "ingress.config.autoSync": "自動同期",
+  "ingress.events": "イングレスイベントログ",
+  "ingress.events.empty": "この scope にはまだ項目がありません",
+  "ingress.tag.ide": "IDE",
+  "ingress.tag.kb": "ナレッジベース",
+  "ingress.tag.text": "テキスト",
+  "ingress.tag.file": "ファイル",
+  "ingress.tag.web": "Web",
+  "ingress.tag.session": "セッション",
+  "ingress.tag.retrieval": "検索",
+  "ingress.source.note": "ノート",
+
+  "skills.typeShare": "skill タイプ比率",
+  "skills.type": "skill タイプ",
+  "skills.distilled": "蒸留済みスキル",
+  "skills.export": "エクスポート形式",
+  "skills.export.download": "ダウンロード",
+  "skills.export.noSkills": "スキルなし",
+  "skills.systemPrompt": "Agent プロンプト注入",
+  "skills.systemPrompt.hint": "prompt タイプのスキルを <available_skills> ブロックとしてフォーマットします。LLM のシステムプロンプトに貼り付けると、モデルがこれらのスキル仕様を認識・遵守できるようになります。",
+  "skills.systemPrompt.copy": "コピー",
+  "skills.systemPrompt.copied": "コピー済み",
+  "skills.systemPrompt.empty": "prompt タイプのスキルがありません（蒸留後に表示されます）",
+  "skills.detail.description": "説明",
+  "skills.detail.body": "本文",
+  "skills.detail.parameters": "パラメータ Schema",
+  "skills.detail.inputSchema": "Input Schema",
+  "skills.detail.confidence": "信頼度",
+  "skills.detail.source": "ソース",
+  "skills.detail.createdAt": "作成日時",
+
+  "settings.connection": "バックエンド接続",
+  "settings.connection.desc": "daemon HTTP サーバーのアドレス。",
+  "settings.model.desc": "推論 / 埋め込みモデル、デフォルト scope、監視パス。",
+  "settings.system.desc": "バックグラウンド daemon と自動同期の稼働状態。",
+  "settings.conn.mode": "モード",
+  "settings.conn.modeValue": "local daemon",
+  "settings.conn.addr": "アドレス",
+  "settings.conn.auth": "認証",
+  "settings.conn.authValue": "token (web only)",
+  "settings.model": "モデルとパラメータ",
+  "settings.system": "システム制御",
+  "settings.sys.daemon": "daemon",
+  "settings.sys.daemonValue": "running",
+  "settings.sys.autoSync": "auto sync",
+  "settings.sys.autoSyncValue": "on",
+  "settings.sys.autoSyncOff": "オフ",
+  "settings.model.watchPaths": "監視パス",
+  "settings.refresh": "更新",
+  "settings.loadError": "読み込み失敗",
+};
+
+const DICTS: Record<Lang, Dict> = { zh, en, ja };
+
+interface I18nValue {
+  lang: Lang;
+  setLang: (lang: Lang) => void;
+  t: (key: string, vars?: Record<string, string | number>) => string;
+}
+
+const I18nContext = createContext<I18nValue | null>(null);
+
+function interpolate(template: string, vars?: Record<string, string | number>): string {
+  if (!vars) return template;
+  return template.replace(/\{(\w+)\}/g, (_, k) =>
+    k in vars ? String(vars[k]) : `{${k}}`,
+  );
+}
+
+export function I18nProvider({ children }: { children: React.ReactNode }) {
+  const [lang, setLangState] = useState<Lang>(() => {
+    if (typeof window !== "undefined") {
+      const saved = window.localStorage.getItem(STORAGE_KEY);
+      if (saved === "zh" || saved === "en" || saved === "ja") return saved;
+    }
+    return DEFAULT_LANG;
+  });
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(STORAGE_KEY, lang);
+      document.documentElement.lang = HTML_LANG[lang];
+    }
+  }, [lang]);
+
+  const setLang = useCallback((next: Lang) => setLangState(next), []);
+
+  const t = useCallback(
+    (key: string, vars?: Record<string, string | number>) => {
+      const dict = DICTS[lang];
+      const template = dict[key] ?? DICTS.zh[key] ?? key;
+      return interpolate(template, vars);
+    },
+    [lang],
+  );
+
+  const value = useMemo(() => ({ lang, setLang, t }), [lang, setLang, t]);
+
+  return <I18nContext.Provider value={value}>{children}</I18nContext.Provider>;
+}
+
+export function useI18n() {
+  const ctx = useContext(I18nContext);
+  if (!ctx) throw new Error("useI18n must be used within an I18nProvider");
+  return ctx;
+}
