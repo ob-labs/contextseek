@@ -136,8 +136,7 @@ class FakeAdapter:
 
     def search(self, prefix, query, k=20, **kwargs):
         return [
-            dict(self.payloads[f"{prefix}{item_id}"])
-            for item_id in self.search_ids[:k]
+            dict(self.payloads[f"{prefix}{item_id}"]) for item_id in self.search_ids[:k]
         ]
 
 

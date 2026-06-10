@@ -341,9 +341,7 @@ class RetrievalOrchestrator:
 
         resolver = ScopeResolver()
         seed_ids = {
-            str(item.get("id", ""))
-            for item in seeds
-            if str(item.get("id", "")).strip()
+            str(item.get("id", "")) for item in seeds if str(item.get("id", "")).strip()
         }
         best_seen_score_by_id: dict[str, float] = {
             item_id: max(float(item.get("score", 0.0) or 0.0), 0.0)
@@ -351,8 +349,7 @@ class RetrievalOrchestrator:
             if (item_id := str(item.get("id", "")).strip())
         }
         queue: list[tuple[dict[str, object], int, float]] = [
-            (item, 0, max(float(item.get("score", 1.0) or 1.0), 0.0))
-            for item in seeds
+            (item, 0, max(float(item.get("score", 1.0) or 1.0), 0.0)) for item in seeds
         ]
         expanded_by_id: dict[str, dict[str, object]] = {}
 

@@ -524,9 +524,7 @@ def to_strategy_config(settings: ContextSeekSettings) -> "StrategyConfig":
             link_expansion_max_depth=settings.retrieval.link_expansion_max_depth,
             link_expansion_decay=settings.retrieval.link_expansion_decay,
             link_expansion_min_strength=settings.retrieval.link_expansion_min_strength,
-            link_expansion_relations=tuple(
-                settings.retrieval.link_expansion_relations
-            ),
+            link_expansion_relations=tuple(settings.retrieval.link_expansion_relations),
             reranker_mode=settings.retrieval.reranker_mode,
             llm_rerank_top_n=settings.retrieval.llm_rerank_top_n,
         ),
