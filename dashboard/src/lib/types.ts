@@ -171,6 +171,38 @@ export interface EvidenceChain {
   needs_reverification: boolean;
 }
 
+export interface GlobalOverview {
+  total_items: number;
+  health_score: number;
+  active_scopes: number;
+  stage_distribution: Record<string, number>;
+  scope_top: { label: string; value: number }[];
+  trend: { labels: string[]; values: number[] };
+  heatmap: { stages: string[]; matrix: number[][] } | null;
+  /** Scope name with highest refuted_by link count, null when none exist */
+  risk_conflict_subject: string | null;
+  /** Ratio of items with no incoming or outgoing links (0–1) */
+  risk_orphan_ratio: number;
+  /** Whether the extracted backlog is large enough to warrant compaction */
+  risk_suggest_compact: boolean;
+}
+
+export interface WatchPath {
+  path: string;
+  scope: string;
+}
+
+export interface Config {
+  storage_backend: string;
+  llm_model: string;
+  embedding_model: string;
+  default_scope: string;
+  version: string;
+  auto_sync: boolean;
+  lifecycle_interval_seconds: number;
+  watch_paths: WatchPath[];
+}
+
 // ---- request payloads ----
 
 export interface AddRequest {
@@ -238,4 +270,38 @@ export interface EvidenceChainRequest {
 export interface ItemsRequest {
   scope: string;
   stage?: Stage;
+}
+
+export interface SkillToolsRequest {
+  scope: string;
+  fmt?: "openai" | "anthropic" | "mcp";
+  query?: string;
+  k?: number;
+}
+
+export interface SkillToolsResponse {
+  tools: unknown[];
+}
+
+export interface SkillContextRequest {
+  scope: string;
+  query?: string;
+  k?: number;
+}
+
+export interface SkillContextResponse {
+  context: string;
+}
+
+export interface SkillMdItem {
+  name: string;
+  content: string;
+}
+
+export interface SkillMdRequest {
+  scope: string;
+}
+
+export interface SkillMdResponse {
+  skills: SkillMdItem[];
 }

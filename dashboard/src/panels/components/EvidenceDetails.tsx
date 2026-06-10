@@ -1,9 +1,11 @@
 import { ConfidenceBar } from "@/components/common/ConfidenceBar";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
+import { useI18n } from "@/lib/i18n";
 import type { EvidenceChain } from "@/lib/types";
 
 export function EvidenceDetails({ chain }: { chain: EvidenceChain }) {
+  const { t } = useI18n();
   return (
     <div className="space-y-4">
       <Card>
@@ -23,16 +25,20 @@ export function EvidenceDetails({ chain }: { chain: EvidenceChain }) {
             </Metric>
           </div>
           <div className="flex flex-wrap gap-2">
-            {chain.has_conflicts && <Badge variant="destructive">存在冲突</Badge>}
-            {chain.needs_reverification && <Badge variant="destructive">需重新验证</Badge>}
+            {chain.has_conflicts && <Badge variant="destructive">{t("evidence.hasConflicts")}</Badge>}
+            {chain.needs_reverification && (
+              <Badge variant="destructive">{t("evidence.needsReverify")}</Badge>
+            )}
             {chain.broken_links.length > 0 && (
-              <Badge variant="secondary">断链 {chain.broken_links.length}</Badge>
+              <Badge variant="secondary">
+                {t("evidence.brokenLinks")} {chain.broken_links.length}
+              </Badge>
             )}
           </div>
         </CardContent>
       </Card>
 
-      <Section title={`关键路径 (${chain.critical_path.length})`}>
+      <Section title={`${t("evidence.criticalPath")} (${chain.critical_path.length})`}>
         {chain.critical_path.length ? (
           <div className="flex flex-wrap items-center gap-1 font-mono text-xs">
             {chain.critical_path.map((id, i) => (
@@ -47,7 +53,7 @@ export function EvidenceDetails({ chain }: { chain: EvidenceChain }) {
         )}
       </Section>
 
-      <Section title={`冲突 (${chain.conflicts.length})`}>
+      <Section title={`${t("evidence.conflicts")} (${chain.conflicts.length})`}>
         {chain.conflicts.length ? (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
@@ -77,7 +83,7 @@ export function EvidenceDetails({ chain }: { chain: EvidenceChain }) {
       </Section>
 
       {chain.broken_links.length > 0 && (
-        <Section title={`断链 (${chain.broken_links.length})`}>
+        <Section title={`${t("evidence.brokenLinks")} (${chain.broken_links.length})`}>
           <div className="flex flex-wrap gap-1 font-mono text-xs">
             {chain.broken_links.map((id) => (
               <span key={id} className="rounded bg-rose-100 px-1.5 py-0.5 text-rose-900">
@@ -110,5 +116,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function Empty() {
-  return <p className="text-xs text-muted-foreground">无</p>;
+  const { t } = useI18n();
+  return <p className="text-xs text-muted-foreground">{t("common.none")}</p>;
 }

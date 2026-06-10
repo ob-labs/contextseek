@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { useNav } from "@/context/NavContext";
+import { useI18n } from "@/lib/i18n";
 import type { ContextItem } from "@/lib/types";
 
 export function ItemCard({
@@ -19,6 +20,7 @@ export function ItemCard({
   actions?: React.ReactNode;
   defaultOpen?: boolean;
 }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(defaultOpen);
   const { navigate } = useNav();
   const deleted = Boolean(item.deleted_at);
@@ -61,7 +63,7 @@ export function ItemCard({
         <Button
           variant="ghost"
           size="icon"
-          title="查看溯源"
+          title={t("item.viewProvenance")}
           onClick={() => navigate("provenance", { itemId: item.id })}
         >
           <GitGraph className="h-4 w-4" />

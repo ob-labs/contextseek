@@ -13,14 +13,17 @@ from contextseek.domain.context_item import ContextItem
 
 def _skill_name(skill: ContextItem) -> str:
     if isinstance(skill.content, dict):
-        return skill.content.get("name", skill.id[:8])
-    return skill.id[:8]
+        return skill.content.get("name", skill.summary or skill.id[:8])
+    # String-content skill: prefer summary, fall back to ID prefix
+    return skill.summary or skill.id[:8]
 
 
 def _skill_desc(skill: ContextItem) -> str:
     if isinstance(skill.content, dict):
-        return skill.content.get("description", "")
-    return ""
+        return skill.content.get("description", skill.summary or "")
+    # Use the first 100 chars of string content as description
+    text = str(skill.content)
+    return text[:100] + ("..." if len(text) > 100 else "")
 
 
 def _skill_type(skill: ContextItem) -> str:
@@ -129,9 +132,11 @@ class SkillExporter:
         body = ""
         if isinstance(item.content, dict):
             body = item.content.get("body", "")
+        elif isinstance(item.content, str):
+            body = item.content
 
         parts = [f"### {name}"]
-        if desc:
+        if desc and desc != body:
             parts.append(desc)
         if body:
             parts.append(body)
@@ -149,6 +154,9 @@ class SkillExporter:
             version = item.content.get("version", version)
             tags = item.content.get("tags", [])
             body = item.content.get("body", "")
+        elif isinstance(item.content, str):
+            # Plain-text skill: use the full string as the Markdown body
+            body = item.content
 
         tag_str = ", ".join(tags) if tags else ""
         frontmatter = f"---\nname: {name}\ndescription: {desc}\nversion: {version}\n"

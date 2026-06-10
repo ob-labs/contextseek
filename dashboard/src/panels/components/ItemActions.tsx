@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ctx } from "@/lib/ctxClient";
+import { useI18n } from "@/lib/i18n";
 import { useScope } from "@/context/ScopeContext";
 import { errorMessage } from "@/lib/utils";
 
@@ -20,6 +21,7 @@ import { errorMessage } from "@/lib/utils";
  * `onChanged` lets the parent refresh its list afterwards.
  */
 export function ItemActions({ itemId, onChanged }: { itemId: string; onChanged?: () => void }) {
+  const { t } = useI18n();
   const { scope } = useScope();
   const [busy, setBusy] = useState<string>("");
   const [msg, setMsg] = useState<string>("");
@@ -48,7 +50,7 @@ export function ItemActions({ itemId, onChanged }: { itemId: string; onChanged?:
         loading={busy === "feedback+"}
         onClick={() => act("feedback+", () => ctx.feedback({ scope, item_id: itemId, score: 1 }))}
       >
-        👍 有用
+        {t("item.useful")}
       </AsyncButton>
       <AsyncButton
         size="sm"
@@ -56,7 +58,7 @@ export function ItemActions({ itemId, onChanged }: { itemId: string; onChanged?:
         loading={busy === "feedback-"}
         onClick={() => act("feedback-", () => ctx.feedback({ scope, item_id: itemId, score: -1 }))}
       >
-        👎 没用
+        {t("item.useless")}
       </AsyncButton>
       <AsyncButton
         size="sm"
@@ -64,19 +66,19 @@ export function ItemActions({ itemId, onChanged }: { itemId: string; onChanged?:
         loading={busy === "forget"}
         onClick={() => act("forget", () => ctx.forget({ scope, item_id: itemId }))}
       >
-        忘记 (软删)
+        {t("item.forget")}
       </AsyncButton>
       <Button size="sm" variant="destructive" onClick={() => setConfirmDelete(true)}>
-        <Trash2 className="h-4 w-4" /> 删除
+        <Trash2 className="h-4 w-4" /> {t("item.delete")}
       </Button>
       {msg && <span className="text-xs text-muted-foreground">{msg}</span>}
 
       <Dialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>确认硬删除？</DialogTitle>
+            <DialogTitle>{t("item.confirmDeleteTitle")}</DialogTitle>
             <DialogDescription>
-              将永久删除条目 <span className="font-mono">{itemId}</span>，不可恢复。
+              {t("item.confirmDeleteDesc", { id: itemId })}
             </DialogDescription>
           </DialogHeader>
           <label className="flex items-center gap-2 text-sm">
@@ -85,11 +87,11 @@ export function ItemActions({ itemId, onChanged }: { itemId: string; onChanged?:
               checked={propagate}
               onChange={(e) => setPropagate(e.target.checked)}
             />
-            级联删除派生条目 (propagate)
+            {t("item.propagate")}
           </label>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmDelete(false)}>
-              取消
+              {t("common.cancel")}
             </Button>
             <AsyncButton
               variant="destructive"
@@ -101,7 +103,7 @@ export function ItemActions({ itemId, onChanged }: { itemId: string; onChanged?:
                 setConfirmDelete(false);
               }}
             >
-              确认删除
+              {t("item.confirmDelete")}
             </AsyncButton>
           </DialogFooter>
         </DialogContent>

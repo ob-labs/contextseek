@@ -10,11 +10,13 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useNav } from "@/context/NavContext";
 import { ctx } from "@/lib/ctxClient";
+import { useI18n } from "@/lib/i18n";
 import { useScope } from "@/context/ScopeContext";
 import { errorMessage } from "@/lib/utils";
 import type { AddResponse } from "@/lib/types";
 
 export function WritePanel() {
+  const { t } = useI18n();
   const { scope } = useScope();
   const { navigate } = useNav();
   const [content, setContent] = useState("");
@@ -33,7 +35,7 @@ export function WritePanel() {
       try {
         payload = JSON.parse(content);
       } catch {
-        setError(new Error("content 不是合法 JSON"));
+        setError(new Error(t("write.jsonInvalid")));
         return;
       }
     }
@@ -45,7 +47,7 @@ export function WritePanel() {
         source: source || "api",
         tags: tags
           .split(",")
-          .map((t) => t.trim())
+          .map((tag) => tag.trim())
           .filter(Boolean),
       });
       setResult(res);
@@ -64,21 +66,21 @@ export function WritePanel() {
         <CardContent className="space-y-4 pt-6">
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
-              <Label htmlFor="content">内容</Label>
+              <Label htmlFor="content">{t("write.content")}</Label>
               <label className="flex items-center gap-2 text-xs text-muted-foreground">
                 <input
                   type="checkbox"
                   checked={asJson}
                   onChange={(e) => setAsJson(e.target.checked)}
                 />
-                按 JSON 解析
+                {t("write.asJson")}
               </label>
             </div>
             <Textarea
               id="content"
               value={content}
               onChange={(e) => setContent(e.target.value)}
-              placeholder={asJson ? '{"key": "value"}' : "要写入的文本…"}
+              placeholder={asJson ? t("write.contentJsonPlaceholder") : t("write.contentTextPlaceholder")}
               className="min-h-32"
             />
           </div>
@@ -93,7 +95,7 @@ export function WritePanel() {
               />
             </div>
             <div className="flex-1 space-y-1.5">
-              <Label htmlFor="tags">tags (逗号分隔)</Label>
+              <Label htmlFor="tags">{t("write.tags")}</Label>
               <Input
                 id="tags"
                 value={tags}
@@ -103,7 +105,7 @@ export function WritePanel() {
             </div>
           </div>
           <AsyncButton loading={loading} onClick={submit} disabled={!content.trim()}>
-            <PlusCircle className="h-4 w-4" /> 写入 scope「{scope}」
+            <PlusCircle className="h-4 w-4" /> {t("write.action", { scope })}
           </AsyncButton>
           {error ? <p className="text-sm text-destructive">{errorMessage(error)}</p> : null}
         </CardContent>
@@ -112,18 +114,18 @@ export function WritePanel() {
       {result && (
         <Card>
           <CardContent className="flex flex-wrap items-center gap-3 pt-6">
-            <span className="text-sm">已写入：</span>
+            <span className="text-sm">{t("write.written")}</span>
             <span className="font-mono text-sm">{result.id}</span>
             <StageBadge stage={result.stage} />
             <Button variant="outline" size="sm" onClick={() => navigate("browse")}>
-              去浏览
+              {t("write.goBrowse")}
             </Button>
             <Button
               variant="outline"
               size="sm"
               onClick={() => navigate("provenance", { itemId: result.id })}
             >
-              看溯源
+              {t("write.goProvenance")}
             </Button>
           </CardContent>
         </Card>
