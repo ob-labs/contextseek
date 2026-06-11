@@ -14,10 +14,22 @@ from contextseek.domain.serialization import (
     deserialize_context_item,
     serialize_context_item,
 )
+from contextseek.ingestion import (
+    ConnectorConfig,
+    ConnectorKind,
+    ConnectorMode,
+    ConnectorRuntime,
+    IngestionControlPlane,
+    IngestionWriter,
+    JsonFileCheckpointStore,
+    JsonFileConnectorConfigStore,
+    JsonlDeadLetterStore,
+)
 
 try:
-    from fastapi import FastAPI
+    from fastapi import FastAPI, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import PlainTextResponse
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel, Field
     from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -118,6 +130,15 @@ class ItemsRequest(BaseModel):
     stage: str | None = None
 
 
+class ConnectorCreateRequest(BaseModel):
+    connector_id: str
+    kind: ConnectorKind
+    mode: ConnectorMode
+    config: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    owner: str = "api"
+
+
 _API_ROOT_SEGMENTS: set[str] = {
     "add",
     "retrieve",
@@ -141,6 +162,7 @@ _API_ROOT_SEGMENTS: set[str] = {
     "metrics",
     "seed",
     "health",
+    "connectors",
     "__desktop",
 }
 
@@ -220,6 +242,16 @@ def _parse_watch_paths() -> list[dict[str, str]]:
     return results
 
 
+def _ingestion_state_dir() -> Path:
+    raw = os.environ.get("INGESTION_STATE_DIR", "").strip()
+    if raw:
+        path = Path(raw).expanduser()
+    else:
+        path = Path.home() / ".contextseek" / "ingestion"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def create_app(client: ContextSeek | None = None) -> FastAPI:
     """Create FastAPI application backed by ContextSeek."""
     app = FastAPI(title="ContextSeek API", version=PACKAGE_VERSION)
@@ -241,6 +273,18 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
     )
 
     ctx = client or ContextSeek.from_settings()
+    ingestion_dir = _ingestion_state_dir()
+    ingestion_runtime = ConnectorRuntime(
+        writer=IngestionWriter(ctx),
+        checkpoint_store=JsonFileCheckpointStore(ingestion_dir / "checkpoints.json"),
+        dead_letter_store=JsonlDeadLetterStore(ingestion_dir / "dead_letters.jsonl"),
+    )
+    control = IngestionControlPlane(
+        ingestion_runtime,
+        config_store=JsonFileConnectorConfigStore(ingestion_dir / "connectors.json"),
+        restore_on_startup=True,
+    )
+    ingestion_runtime.event_callback = control.record_event
 
     @app.post("/add")
     async def add_item(req: AddRequest) -> dict[str, Any]:
@@ -403,6 +447,123 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
         stage = Stage(req.stage) if req.stage else None
         result_items = ctx.items(scope=req.scope, stage=stage)
         return {"items": [serialize_context_item(it) for it in result_items]}
+
+    @app.post("/connectors")
+    async def create_connector(req: ConnectorCreateRequest) -> dict[str, Any]:
+        config = ConnectorConfig(
+            connector_id=req.connector_id,
+            kind=req.kind,
+            mode=req.mode,
+            config=req.config,
+            enabled=req.enabled,
+            owner=req.owner,
+        )
+        created = control.create_connector(config)
+        return {
+            "connector": created.connector_id,
+            "kind": created.kind.value,
+            "mode": created.mode.value,
+        }
+
+    @app.get("/connectors")
+    async def list_connectors() -> dict[str, Any]:
+        return {"connectors": control.list_connectors()}
+
+    @app.post("/connectors/{connector_id}/sync")
+    async def sync_connector(connector_id: str) -> dict[str, Any]:
+        if connector_id not in {cfg["connector_id"] for cfg in control.list_connectors()}:
+            raise HTTPException(status_code=404, detail=f"connector not found: {connector_id}")
+        steps = control.trigger_sync(connector_id)
+        return {"connector_id": connector_id, "scheduled_steps": steps}
+
+    @app.post("/connectors/{connector_id}/pause")
+    async def pause_connector(connector_id: str) -> dict[str, Any]:
+        try:
+            control.pause(connector_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"connector not found: {connector_id}",
+            ) from exc
+        return {"connector_id": connector_id, "status": "paused"}
+
+    @app.post("/connectors/{connector_id}/resume")
+    async def resume_connector(connector_id: str) -> dict[str, Any]:
+        try:
+            control.resume(connector_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"connector not found: {connector_id}",
+            ) from exc
+        return {"connector_id": connector_id, "status": "enabled"}
+
+    @app.get("/connectors/{connector_id}/checkpoints")
+    async def connector_checkpoints(connector_id: str) -> dict[str, Any]:
+        if connector_id not in {cfg["connector_id"] for cfg in control.list_connectors()}:
+            raise HTTPException(status_code=404, detail=f"connector not found: {connector_id}")
+        return {"connector_id": connector_id, "checkpoints": control.checkpoints(connector_id)}
+
+    @app.get("/connectors/{connector_id}/events")
+    async def connector_events(connector_id: str) -> dict[str, Any]:
+        if connector_id not in {cfg["connector_id"] for cfg in control.list_connectors()}:
+            raise HTTPException(status_code=404, detail=f"connector not found: {connector_id}")
+        return {"connector_id": connector_id, "events": control.events(connector_id)}
+
+    @app.get("/connectors/{connector_id}/dead-letters")
+    async def connector_dead_letters(connector_id: str) -> dict[str, Any]:
+        if connector_id not in {cfg["connector_id"] for cfg in control.list_connectors()}:
+            raise HTTPException(status_code=404, detail=f"connector not found: {connector_id}")
+        return {
+            "connector_id": connector_id,
+            "dead_letters": control.dead_letters(connector_id),
+        }
+
+    @app.post("/connectors/{connector_id}/dead-letters/{record_id}/replay")
+    async def replay_dead_letter(connector_id: str, record_id: str) -> dict[str, Any]:
+        try:
+            result = control.replay_dead_letter(connector_id, record_id, run_now=True)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"connector not found: {connector_id}",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return result
+
+    @app.post("/connectors/{connector_id}/dead-letters/replay-all")
+    async def replay_all_dead_letters(
+        connector_id: str,
+        remove_after_replay: bool = False,
+    ) -> dict[str, Any]:
+        try:
+            return control.replay_all_dead_letters(
+                connector_id,
+                run_now=True,
+                remove_after_replay=remove_after_replay,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"connector not found: {connector_id}",
+            ) from exc
+
+    @app.delete("/connectors/{connector_id}/dead-letters/{record_id}")
+    async def delete_dead_letter(connector_id: str, record_id: str) -> dict[str, Any]:
+        try:
+            deleted = control.delete_dead_letter(connector_id, record_id)
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"connector not found: {connector_id}",
+            ) from exc
+        if not deleted:
+            raise HTTPException(
+                status_code=404,
+                detail=f"dead-letter record not found: {record_id}",
+            )
+        return {"connector_id": connector_id, "record_id": record_id, "deleted": True}
 
     @app.get("/overview")
     async def overview_scope(scope: str) -> dict[str, Any]:
@@ -597,9 +758,15 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
             "watch_paths": _parse_watch_paths(),
         }
 
-    @app.get("/metrics")
+    @app.get("/metrics", response_class=PlainTextResponse)
     async def metrics() -> str:
-        return ctx.audit_log.export_prometheus() if ctx.audit_log is not None else ""
+        chunks: list[str] = []
+        if ctx.audit_log is not None:
+            chunks.append(ctx.audit_log.export_prometheus())
+        ingestion_metrics = ingestion_runtime.export_prometheus_metrics()
+        if ingestion_metrics:
+            chunks.append(ingestion_metrics)
+        return "\n".join(part for part in chunks if part)
 
     @app.post("/seed")
     async def seed_examples() -> dict[str, Any]:
