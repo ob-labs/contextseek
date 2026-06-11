@@ -28,6 +28,24 @@ class RetrievalStrategy:
     link_boost: float = 0.10
     link_refute_penalty: float = 0.40
     link_supersede_penalty: float = 0.35
+    # Relation-aware reranking: adjust scores by inter-candidate links.
+    # Wraps the active reranker (heuristic or LLM) when enabled.
+    relation_aware_enabled: bool = True
+    # Link graph expansion during recall. Loose placeholder relations are
+    # excluded by default until producers create them with stronger semantics.
+    link_expansion_enabled: bool = True
+    link_expansion_max_depth: int = 2
+    link_expansion_decay: float = 0.65
+    link_expansion_min_strength: float = 0.0
+    link_expansion_relations: tuple[str, ...] = (
+        "derived_from",
+        "supported_by",
+        "refuted_by",
+        "supersedes",
+        "merged_from",
+        "distilled_into",
+        "synthesized_from",
+    )
     # Namespace weights: tuple of (prefix, weight_multiplier) pairs
     namespace_weights: tuple[tuple[str, float], ...] = ()
     # Stage weights for scoring
