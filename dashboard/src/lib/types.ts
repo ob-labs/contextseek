@@ -194,8 +194,14 @@ export interface WatchPath {
 
 export interface Config {
   storage_backend: string;
+  llm_provider?: string;
   llm_model: string;
+  llm_base_url?: string;
+  llm_api_key?: string;
+  embedding_provider?: string;
   embedding_model: string;
+  embedding_base_url?: string;
+  embedding_api_key?: string;
   default_scope: string;
   version: string;
   auto_sync: boolean;
@@ -215,6 +221,28 @@ export interface Config {
   // SQLite (storage_backend === "sqlite")
   sqlite_path?: string;
   // File (storage_backend === "file")
+  storage_path?: string;
+}
+
+export interface ConfigUpdateRequest {
+  storage_backend?: string;
+  llm_provider?: string;
+  llm_model?: string;
+  llm_base_url?: string;
+  llm_api_key?: string;
+  embedding_provider?: string;
+  embedding_model?: string;
+  embedding_base_url?: string;
+  embedding_api_key?: string;
+  ob_host?: string;
+  ob_port?: string;
+  ob_db_name?: string;
+  ob_table_name?: string;
+  seekdb_host?: string;
+  seekdb_port?: string;
+  seekdb_database?: string;
+  seekdb_path?: string;
+  sqlite_path?: string;
   storage_path?: string;
 }
 

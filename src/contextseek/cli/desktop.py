@@ -14,6 +14,34 @@ import sys
 from pathlib import Path
 
 
+def _read_config_env(keys: set[str]) -> dict[str, str]:
+    """Read simple KEY=value entries from the resolved ContextSeek config file."""
+    try:
+        from contextseek.config.settings import _get_default_env_file
+    except Exception:
+        return {}
+
+    env_file = _get_default_env_file()
+    if not env_file:
+        return {}
+
+    values: dict[str, str] = {}
+    try:
+        lines = Path(env_file).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip().upper()
+        if key in keys:
+            values[key] = value.strip().strip('"').strip("'")
+    return values
+
+
 def _default_data_dir() -> Path:
     """Platform-standard application data directory for ContextSeek."""
     if sys.platform == "darwin":
@@ -35,16 +63,27 @@ def _configure_storage(data_dir: Path) -> str:
     vector recall via pyseekdb's ONNX embedder when available. Returns the
     effective backend name for logging.
     """
+    config_env = _read_config_env(
+        {"STORAGE_BACKEND", "SQLITE_PATH", "SEEKDB_PATH", "STORAGE_PATH"}
+    )
     backend = os.environ.get("STORAGE_BACKEND", "").strip()
+    if not backend:
+        backend = config_env.get("STORAGE_BACKEND", "").strip()
     if not backend:
         backend = "sqlite"
         os.environ["STORAGE_BACKEND"] = backend
 
-    if backend == "sqlite":
+    if backend == "sqlite" and not (
+        os.environ.get("SQLITE_PATH") or config_env.get("SQLITE_PATH")
+    ):
         os.environ.setdefault("SQLITE_PATH", str(data_dir / "contextseek.sqlite3"))
-    elif backend == "seekdb":
+    elif backend == "seekdb" and not (
+        os.environ.get("SEEKDB_PATH") or config_env.get("SEEKDB_PATH")
+    ):
         os.environ.setdefault("SEEKDB_PATH", str(data_dir / "seekdb.db"))
-    elif backend == "file":
+    elif backend == "file" and not (
+        os.environ.get("STORAGE_PATH") or config_env.get("STORAGE_PATH")
+    ):
         os.environ.setdefault("STORAGE_PATH", str(data_dir / "store"))
     return backend
 

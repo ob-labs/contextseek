@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import signal
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -103,6 +104,28 @@ class SkillToolsRequest(BaseModel):
     k: int = 20
 
 
+class ConfigUpdateRequest(BaseModel):
+    llm_provider: str | None = None
+    embedding_provider: str | None = None
+    storage_backend: str | None = None
+    llm_model: str | None = None
+    llm_base_url: str | None = None
+    llm_api_key: str | None = None
+    embedding_model: str | None = None
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = None
+    ob_host: str | None = None
+    ob_port: str | None = None
+    ob_db_name: str | None = None
+    ob_table_name: str | None = None
+    seekdb_host: str | None = None
+    seekdb_port: str | None = None
+    seekdb_database: str | None = None
+    seekdb_path: str | None = None
+    sqlite_path: str | None = None
+    storage_path: str | None = None
+
+
 class SkillContextRequest(BaseModel):
     scope: str
     query: str | None = None
@@ -141,6 +164,8 @@ _API_ROOT_SEGMENTS: set[str] = {
     "metrics",
     "seed",
     "health",
+    "install",
+    "restart",
     "__desktop",
 }
 
@@ -218,6 +243,86 @@ def _parse_watch_paths() -> list[dict[str, str]]:
             expanded = str(Path(path_part.strip()).expanduser())
             results.append({"path": expanded, "scope": scope_part.strip()})
     return results
+
+
+def _update_env_file(updates: dict[str, str]) -> None:
+    """Write key=value pairs into the resolved .env config file.
+
+    Existing lines matching a key are replaced in-place; keys not yet present
+    are appended at the end.  KWARGS keys (LLM_KWARGS / EMBEDDING_KWARGS) are
+    handled specially: the JSON dict is read, the ``api_key`` field updated,
+    and the whole dict written back as JSON.
+    """
+    import json as _json
+
+    from contextseek.config.settings import _get_default_env_file
+
+    env_file = _get_default_env_file()
+    if env_file is None:
+        raise FileNotFoundError("No .env config file found to update.")
+
+    env_path = Path(env_file)
+    lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+    def _set_line(lines: list[str], key: str, value: str) -> list[str]:
+        prefix = f"{key}="
+        new_line = f"{key}={value}\n"
+        for i, line in enumerate(lines):
+            if line.lstrip().startswith(prefix) or line.lstrip().startswith(f"# {prefix}"):
+                if line.lstrip().startswith(prefix):
+                    lines[i] = new_line
+                    return lines
+        lines.append(new_line)
+        return lines
+
+    def _update_kwargs_key(
+        lines: list[str], kwargs_key: str, field: str, value: str
+    ) -> tuple[list[str], str]:
+        """Read KWARGS JSON, update field, write back."""
+        prefix = f"{kwargs_key}="
+        existing: dict[str, Any] = {}
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith(prefix):
+                raw = stripped[len(prefix):].strip().strip('"').strip("'")
+                try:
+                    existing = _json.loads(raw)
+                except Exception:
+                    existing = {}
+                break
+        existing[field] = value
+        serialized = _json.dumps(existing)
+        return _set_line(lines, kwargs_key, serialized), serialized
+
+    for env_key, env_val in updates.items():
+        if env_key == "LLM_API_KEY":
+            lines, serialized = _update_kwargs_key(
+                lines, "LLM_KWARGS", "api_key", env_val
+            )
+            os.environ["LLM_KWARGS"] = serialized
+        elif env_key == "EMBEDDING_API_KEY":
+            lines, serialized = _update_kwargs_key(
+                lines, "EMBEDDING_KWARGS", "api_key", env_val
+            )
+            os.environ["EMBEDDING_KWARGS"] = serialized
+        else:
+            lines = _set_line(lines, env_key, env_val)
+            os.environ[env_key] = env_val
+
+    env_path.write_text("".join(lines), encoding="utf-8")
+
+
+def _server_argv() -> list[str]:
+    """Return an argv that restarts the server without losing ``-m`` execution."""
+    orig_argv = getattr(sys, "orig_argv", None)
+    if isinstance(orig_argv, list) and len(orig_argv) > 1:
+        return [sys.executable, *orig_argv[1:]]
+    return [sys.executable, *sys.argv]
+
+
+def _running_with_reload() -> bool:
+    argv = [str(arg) for arg in [*getattr(sys, "orig_argv", []), *sys.argv]]
+    return "--reload" in argv
 
 
 def create_app(client: ContextSeek | None = None) -> FastAPI:
@@ -589,8 +694,14 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
         lc = LifecycleSettings()
         result: dict[str, Any] = {
             "storage_backend": s.storage.backend,
+            "llm_provider": s.llm.provider,
             "llm_model": s.llm.model or s.llm.provider,
+            "llm_base_url": s.llm.base_url,
+            "llm_api_key": s.llm.kwargs.get("api_key", ""),
+            "embedding_provider": s.embedding.provider,
             "embedding_model": s.embedding.model or s.embedding.provider,
+            "embedding_base_url": s.embedding.base_url,
+            "embedding_api_key": s.embedding.kwargs.get("api_key", ""),
             "default_scope": s.default_scope,
             "version": PACKAGE_VERSION,
             "auto_sync": lc.auto_compact,
@@ -624,6 +735,43 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
             result["storage_path"] = str(Path(s.storage.path).expanduser())
         return result
 
+    @app.put("/config")
+    async def update_config(req: ConfigUpdateRequest) -> dict[str, Any]:
+        FIELD_TO_ENV: dict[str, str] = {
+            "storage_backend": "STORAGE_BACKEND",
+            "llm_provider": "LLM_PROVIDER",
+            "llm_model": "LLM_MODEL",
+            "llm_base_url": "LLM_BASE_URL",
+            "llm_api_key": "LLM_API_KEY",
+            "embedding_provider": "EMBEDDING_PROVIDER",
+            "embedding_model": "EMBEDDING_MODEL",
+            "embedding_base_url": "EMBEDDING_BASE_URL",
+            "embedding_api_key": "EMBEDDING_API_KEY",
+            "ob_host": "OB_HOST",
+            "ob_port": "OB_PORT",
+            "ob_db_name": "OB_DB_NAME",
+            "ob_table_name": "OB_TABLE_NAME",
+            "seekdb_host": "SEEKDB_HOST",
+            "seekdb_port": "SEEKDB_PORT",
+            "seekdb_database": "SEEKDB_DATABASE",
+            "seekdb_path": "SEEKDB_PATH",
+            "sqlite_path": "SQLITE_PATH",
+            "storage_path": "STORAGE_PATH",
+        }
+        updates: dict[str, str] = {}
+        for field, env_key in FIELD_TO_ENV.items():
+            val = getattr(req, field, None)
+            if val is not None:
+                updates[env_key] = val
+        if not updates:
+            return {"status": "ok", "restart_required": False}
+        try:
+            _update_env_file(updates)
+        except FileNotFoundError as e:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=500, detail=str(e)) from e
+        return {"status": "ok", "restart_required": True}
+
     @app.get("/metrics")
     async def metrics() -> str:
         return ctx.audit_log.export_prometheus() if ctx.audit_log is not None else ""
@@ -635,6 +783,79 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
 
         seeded = maybe_seed()
         return {"status": "ok", "seeded": seeded}
+
+    @app.post("/install")
+    async def install_package(body: dict[str, str]) -> dict[str, Any]:
+        """Install a Python package into the current environment.
+
+        Prefers ``uv pip install`` (used by this project) and falls back to
+        ``python -m pip install`` when uv is not on PATH.
+        """
+        import shutil
+        import subprocess
+        import sys
+
+        package = (body.get("package") or "").strip()
+        if not package:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail="package is required")
+
+        uv_bin = shutil.which("uv")
+        if uv_bin:
+            cmd = [uv_bin, "pip", "install", "--python", sys.executable, package]
+        else:
+            cmd = [sys.executable, "-m", "pip", "install", package]
+
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return {
+            "status": "ok" if result.returncode == 0 else "error",
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "returncode": result.returncode,
+        }
+
+    @app.post("/restart")
+    async def restart_server() -> dict[str, str]:
+        """Restart the current server process so updated .env values are loaded.
+
+        In uvicorn ``--reload`` mode, nudge the reloader by touching this file.
+        In single-process mode, re-exec the original Python command so ``-m``
+        invocations keep their import semantics.  If the background daemon is
+        also running it is restarted separately so both processes reload config.
+        """
+        import asyncio
+        import shutil
+        import subprocess
+
+        async def _do_restart() -> None:
+            await asyncio.sleep(0.8)
+
+            # Restart background daemon if it's running (config change affects it too)
+            try:
+                from contextseek.daemon.process import DaemonProcess
+
+                daemon = DaemonProcess()
+                if daemon.is_running():
+                    daemon.stop()
+                    await asyncio.sleep(0.3)
+                    bin_path = shutil.which("contextseek") or sys.argv[0]
+                    subprocess.Popen(
+                        [bin_path, "daemon", "start"],
+                        start_new_session=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+            except Exception:
+                pass
+
+            if _running_with_reload():
+                os.utime(__file__, None)
+                return
+
+            os.execv(sys.executable, _server_argv())
+
+        asyncio.create_task(_do_restart())
+        return {"status": "restarting"}
 
     @app.get("/health")
     async def health() -> dict[str, str]:

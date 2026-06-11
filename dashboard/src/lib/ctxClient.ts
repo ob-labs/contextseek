@@ -8,6 +8,7 @@ import type {
   CompactRequest,
   CompactResponse,
   Config,
+  ConfigUpdateRequest,
   DeleteRequest,
   DreamRequest,
   DreamResponse,
@@ -42,6 +43,15 @@ import type {
 // separate-process development (front-end on a different port/host), set
 // VITE_CTX_BASE to the absolute backend URL at build time.
 const BASE = import.meta.env.VITE_CTX_BASE ?? "";
+
+type TauriInvoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
+
+function getTauriInvoke(): TauriInvoke | undefined {
+  const maybeWindow = window as Window & {
+    __TAURI__?: { core?: { invoke?: TauriInvoke } };
+  };
+  return maybeWindow.__TAURI__?.core?.invoke;
+}
 
 export class CtxError extends Error {
   constructor(
@@ -80,6 +90,16 @@ async function get<T>(path: string, query?: Record<string, string>): Promise<T> 
   return res.json() as Promise<T>;
 }
 
+async function put<T>(path: string, payload: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) return parseError(res);
+  return res.json() as Promise<T>;
+}
+
 async function getText(path: string): Promise<string> {
   const res = await fetch(`${BASE}${path}`);
   if (!res.ok) return parseError(res);
@@ -103,6 +123,21 @@ export const ctx = {
     get<GlobalOverview>("/global_overview", scope ? { scope } : undefined),
   scopes: () => get<{ scopes: string[] }>("/scopes"),
   config: () => get<Config>("/config"),
+  updateConfig: (req: ConfigUpdateRequest) =>
+    put<{ status: string; restart_required: boolean }>("/config", req),
+  restart: async () => {
+    const invoke = getTauriInvoke();
+    if (invoke) {
+      await invoke<void>("restart_service");
+      return { status: "restarting" };
+    }
+    return post<{ status: string }>("/restart", {});
+  },
+  installPackage: (pkg: string) =>
+    post<{ status: string; stdout: string; stderr: string; returncode: number }>(
+      "/install",
+      { package: pkg },
+    ),
   seed: () => post<SeedResponse>("/seed", {}),
   health: () => get<Health>("/health"),
   metrics: () => getText("/metrics"),

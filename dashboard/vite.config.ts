@@ -9,7 +9,7 @@ import { defineConfig } from "vite";
 const API_SEGMENTS =
   "add|retrieve|expand|forget|delete|compact|dream|feedback|upstream|" +
   "evidence_chain|chain_confidence|skill_tools|skill_context|skill_md|items|" +
-  "overview|global_overview|scopes|config|metrics|seed|health|__desktop";
+  "overview|global_overview|scopes|config|metrics|seed|health|install|restart|__desktop";
 const API_PROXY_PATTERN = `^/(${API_SEGMENTS})(/|$|\\?)`;
 const API_PROXY_TARGET = { target: "http://127.0.0.1:8000", changeOrigin: true };
 
