@@ -19,9 +19,11 @@ from contextseek.retrieval.components import (
     HeuristicReranker,
     HybridRecallRoute,
     RecallRoute,
+    RelationAwareReranker,
     Reranker,
     VectorRecallRoute,
 )
+from contextseek.routing.resolver import ScopeResolver
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,20 @@ class RetrievalOrchestrator:
             return VectorRecallRoute(self.embedder)
         return DefaultRecallRoute()
 
+    def _build_reranker(self, strategy: RetrievalStrategy) -> Reranker:
+        """Select the reranker, wrapping it with relation-aware scoring.
+
+        Relation-aware reranking wraps whichever base reranker is active — the
+        injected one (e.g. ``LLMReranker``) or the default ``HeuristicReranker``
+        — so link-based boosts/penalties apply regardless of ``reranker_mode``.
+        """
+        reranker = self.reranker or HeuristicReranker()
+        if strategy.relation_aware_enabled and not isinstance(
+            reranker, RelationAwareReranker
+        ):
+            return RelationAwareReranker(reranker)
+        return reranker
+
     def search(
         self,
         *,
@@ -99,7 +115,7 @@ class RetrievalOrchestrator:
         """
         strategy = self.strategy or RetrievalStrategy()
         recall_route = self._build_recall_route(strategy)
-        reranker = self.reranker or HeuristicReranker()
+        reranker = self._build_reranker(strategy)
 
         # ─── Recall ───────────────────────────────────────────────
         recall_start = perf_counter()
@@ -178,6 +194,21 @@ class RetrievalOrchestrator:
             (sid, [h for h in s if _keep(h)]) for sid, s in ranked_streams
         ]
         raw_hits = [h for h in raw_hits if _keep(h)]
+
+        # ─── Link graph expansion (optional) ─────────────────────
+        # Treat related items as an additional recall route. They still flow
+        # through RRF and rerank, so direct text/vector hits retain their normal
+        # advantage while linked evidence/conflicts can enter the candidate set.
+        expanded_hits = self._expand_linked_candidates(
+            seeds=raw_hits,
+            strategy=strategy,
+            include_deleted=include_deleted,
+            keep=_keep,
+        )
+        if expanded_hits:
+            recall_paths.add("link")
+            raw_hits.extend(expanded_hits)
+            ranked_streams.append(("link@graph", expanded_hits))
 
         recall_elapsed_ms = (perf_counter() - recall_start) * 1000.0
 
@@ -287,6 +318,117 @@ class RetrievalOrchestrator:
         if with_stats:
             return hits, stats
         return hits
+
+    def _expand_linked_candidates(
+        self,
+        *,
+        seeds: list[dict[str, object]],
+        strategy: RetrievalStrategy,
+        include_deleted: bool,
+        keep: Callable[[dict[str, object]], bool],
+    ) -> list[dict[str, object]]:
+        """Breadth-first expand recalled candidates along configured links."""
+        if not strategy.link_expansion_enabled or not seeds:
+            return []
+
+        max_depth = max(0, int(strategy.link_expansion_max_depth))
+        if max_depth <= 0:
+            return []
+
+        allowed_relations = set(strategy.link_expansion_relations)
+        if not allowed_relations:
+            return []
+
+        resolver = ScopeResolver()
+        seed_ids = {
+            str(item.get("id", "")) for item in seeds if str(item.get("id", "")).strip()
+        }
+        best_seen_score_by_id: dict[str, float] = {
+            item_id: max(float(item.get("score", 0.0) or 0.0), 0.0)
+            for item in seeds
+            if (item_id := str(item.get("id", "")).strip())
+        }
+        queue: list[tuple[dict[str, object], int, float]] = [
+            (item, 0, max(float(item.get("score", 1.0) or 1.0), 0.0)) for item in seeds
+        ]
+        expanded_by_id: dict[str, dict[str, object]] = {}
+
+        while queue:
+            current, depth, inherited_score = queue.pop(0)
+            if depth >= max_depth:
+                continue
+
+            scope = str(current.get("scope") or "").strip("/")
+            if not scope:
+                continue
+
+            for link in _iter_payload_links(current):
+                relation = str(link.get("relation") or "")
+                if relation not in allowed_relations:
+                    continue
+
+                try:
+                    strength = float(link.get("strength", 1.0))
+                except (TypeError, ValueError):
+                    strength = 1.0
+                if strength < strategy.link_expansion_min_strength:
+                    continue
+
+                target_id = str(link.get("target_id") or "")
+                if not target_id or target_id in seed_ids:
+                    continue
+
+                next_depth = depth + 1
+                link_score = (
+                    inherited_score
+                    * max(strength, 0.0)
+                    * max(strategy.link_expansion_decay, 0.0)
+                )
+                previous_best = best_seen_score_by_id.get(target_id)
+                if previous_best is not None and link_score <= previous_best:
+                    continue
+
+                target_ref = resolver.ref_for(scope, target_id)
+                target_payload = self.adapter.read(target_ref)
+                if target_payload is None:
+                    continue
+                if not include_deleted and target_payload.get("deleted_at"):
+                    continue
+                if not keep(target_payload):
+                    continue
+
+                expanded = dict(target_payload)
+                expanded["_recall_path"] = "link"
+                expanded["_link_expansion_relation"] = relation
+                expanded["_link_expansion_from"] = str(current.get("id") or "")
+                expanded["_link_expansion_depth"] = next_depth
+                expanded["_link_expansion_score"] = round(link_score, 6)
+                expanded["score"] = max(0.0, min(1.0, link_score))
+
+                best_seen_score_by_id[target_id] = link_score
+                existing = expanded_by_id.get(target_id)
+                if existing is None or link_score > float(
+                    existing.get("_link_expansion_score", 0.0)
+                ):
+                    expanded_by_id[target_id] = expanded
+                queue.append((expanded, next_depth, link_score))
+
+        return sorted(
+            expanded_by_id.values(),
+            key=lambda item: (
+                float(item.get("_link_expansion_score", 0.0)),
+                -int(item.get("_link_expansion_depth", 0)),
+            ),
+            reverse=True,
+        )
+
+
+def _iter_payload_links(payload: dict[str, object]) -> list[dict[str, object]]:
+    """Return serialized link dicts from a payload, ignoring malformed entries."""
+    links = payload.get("links", [])
+    if not isinstance(links, list):
+        return []
+    return [link for link in links if isinstance(link, dict)]
 
 
 def _build_provenance_summary(item: ContextItem) -> str:

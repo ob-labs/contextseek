@@ -275,6 +275,22 @@ class RetrievalSettings(BaseSettings):
     link_boost: float = 0.10
     link_refute_penalty: float = 0.40
     link_supersede_penalty: float = 0.35
+    relation_aware_enabled: bool = True
+    link_expansion_enabled: bool = True
+    link_expansion_max_depth: int = 2
+    link_expansion_decay: float = 0.65
+    link_expansion_min_strength: float = 0.0
+    link_expansion_relations: list[str] = Field(
+        default_factory=lambda: [
+            "derived_from",
+            "supported_by",
+            "refuted_by",
+            "supersedes",
+            "merged_from",
+            "distilled_into",
+            "synthesized_from",
+        ]
+    )
     reranker_mode: str = "heuristic"
     llm_rerank_top_n: int = 20
 
@@ -503,6 +519,12 @@ def to_strategy_config(settings: ContextSeekSettings) -> "StrategyConfig":
             link_boost=settings.retrieval.link_boost,
             link_refute_penalty=settings.retrieval.link_refute_penalty,
             link_supersede_penalty=settings.retrieval.link_supersede_penalty,
+            relation_aware_enabled=settings.retrieval.relation_aware_enabled,
+            link_expansion_enabled=settings.retrieval.link_expansion_enabled,
+            link_expansion_max_depth=settings.retrieval.link_expansion_max_depth,
+            link_expansion_decay=settings.retrieval.link_expansion_decay,
+            link_expansion_min_strength=settings.retrieval.link_expansion_min_strength,
+            link_expansion_relations=tuple(settings.retrieval.link_expansion_relations),
             reranker_mode=settings.retrieval.reranker_mode,
             llm_rerank_top_n=settings.retrieval.llm_rerank_top_n,
         ),

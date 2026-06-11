@@ -379,11 +379,12 @@ class RelationAwareReranker:
     """Reranker that applies relation-based boosts and penalties.
 
     Wraps an inner reranker (defaults to ``HeuristicReranker``) and adjusts
-    scores based on relation metadata present on candidate items:
+    scores based on real ``ContextItem.links`` metadata present on candidate
+    items:
 
-    - Items with ``relation_type == "supports"`` get a score boost.
-    - Items with ``relation_type == "refutes"`` get a penalty.
-    - Items with ``relation_type == "supersedes"`` (i.e. the item is superseded) get a penalty.
+    - Items with high-scoring ``supported_by`` candidates get a score boost.
+    - Items with high-scoring ``refuted_by`` candidates get a penalty.
+    - Items targeted by another candidate's ``supersedes`` link get a penalty.
     """
 
     def __init__(self, inner: Reranker | None = None) -> None:
@@ -400,8 +401,57 @@ class RelationAwareReranker:
         ranked = self._inner.rerank(
             candidates, query=query, strategy=strategy, geo_query=geo_query
         )
+        score_by_id = {
+            str(item.get("id", "")): max(0.0, float(item.get("_score", 0.0)))
+            for item in ranked
+            if str(item.get("id", "")).strip()
+        }
+        supersede_penalty_by_id: dict[str, float] = {}
+
+        for item in ranked:
+            source_id = str(item.get("id", ""))
+            source_score = min(1.0, score_by_id.get(source_id, 0.0))
+            for link in _iter_links(item):
+                if str(link.get("relation") or "") != "supersedes":
+                    continue
+                target_id = str(link.get("target_id") or "")
+                if target_id not in score_by_id:
+                    continue
+                strength = _link_strength(link)
+                penalty = max(
+                    0.0,
+                    1.0 - strategy.link_supersede_penalty * strength * source_score,
+                )
+                supersede_penalty_by_id[target_id] = min(
+                    penalty,
+                    supersede_penalty_by_id.get(target_id, 1.0),
+                )
+
         for item in ranked:
             score = float(item.get("_score", 0.0))
+            item_id = str(item.get("id", ""))
+            for link in _iter_links(item):
+                target_id = str(link.get("target_id") or "")
+                if target_id not in score_by_id:
+                    continue
+                strength = _link_strength(link)
+                target_score = min(1.0, score_by_id[target_id])
+                relation = str(link.get("relation") or "").lower()
+                if relation == "supported_by":
+                    score += strategy.link_boost * strength * target_score
+                elif relation == "refuted_by":
+                    score *= max(
+                        0.0,
+                        1.0 - strategy.link_refute_penalty * strength * target_score,
+                    )
+
+            if item.get("superseded_by") or item_id in supersede_penalty_by_id:
+                score *= supersede_penalty_by_id.get(
+                    item_id, max(0.0, 1.0 - strategy.link_supersede_penalty)
+                )
+
+            # Backward-compatible fallback for callers that still pass synthetic
+            # relation metadata directly on candidates.
             relation_type = str(item.get("relation_type", "")).lower()
             if relation_type == "supports":
                 score += strategy.link_boost
@@ -409,6 +459,7 @@ class RelationAwareReranker:
                 score *= max(0.0, 1.0 - strategy.link_refute_penalty)
             elif relation_type in ("supersedes", "superseded", "expired"):
                 score *= max(0.0, 1.0 - strategy.link_supersede_penalty)
+
             # Apply namespace weight if configured
             ns_weights = dict(strategy.namespace_weights)
             ref = str(item.get("ref", ""))
@@ -422,6 +473,20 @@ class RelationAwareReranker:
             key=lambda item: float(item.get("_score", 0.0)),
             reverse=True,
         )
+
+
+def _iter_links(item: dict[str, object]) -> list[dict[str, object]]:
+    links = item.get("links", [])
+    if not isinstance(links, list):
+        return []
+    return [link for link in links if isinstance(link, dict)]
+
+
+def _link_strength(link: dict[str, object]) -> float:
+    try:
+        return max(0.0, min(1.0, float(link.get("strength", 1.0))))
+    except (TypeError, ValueError):
+        return 1.0
 
 
 def _content_for_score(item: dict[str, object]) -> str:
