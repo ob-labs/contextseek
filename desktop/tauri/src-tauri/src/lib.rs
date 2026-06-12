@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 use std::{collections::VecDeque, time::Instant};
 
+use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, RunEvent, WebviewWindow};
@@ -18,8 +19,10 @@ use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
 const FIXED_PORT: u16 = 8000;
-const HEALTH_RETRIES: u32 = 15;
+const HEALTH_RETRIES: u32 = 120;
 const HEALTH_INTERVAL_MS: u64 = 500;
+const HEALTH_POLL_TIMEOUT_MS: u64 = 700;
+const HEALTH_STATUS_TIMEOUT_MS: u64 = 180;
 const SHUTDOWN_GRACE_MS: u64 = 3500;
 const MAX_CRASH_RESTARTS_PER_MIN: usize = 3;
 const CRASH_WINDOW_SECS: u64 = 60;
@@ -31,6 +34,13 @@ struct AppState {
     child: Mutex<Option<CommandChild>>,
     port: Mutex<u16>,
     crash_restarts: Mutex<VecDeque<Instant>>,
+}
+
+#[derive(Serialize)]
+struct BackendStatus {
+    port: u16,
+    healthy: bool,
+    url: Option<String>,
 }
 
 /// Return FIXED_PORT if bindable, otherwise an OS-assigned free port.
@@ -123,15 +133,20 @@ fn shutdown_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}/__desktop/shutdown")
 }
 
+fn is_healthy(port: u16, timeout_ms: u64) -> bool {
+    if port == 0 {
+        return false;
+    }
+    ureq::get(&health_url(port))
+        .timeout(Duration::from_millis(timeout_ms))
+        .call()
+        .is_ok()
+}
+
 /// Poll GET /health until ready. Returns true once the server answers.
 fn wait_for_health(port: u16) -> bool {
-    let url = health_url(port);
     for _ in 0..HEALTH_RETRIES {
-        if ureq::get(&url)
-            .timeout(Duration::from_millis(800))
-            .call()
-            .is_ok()
-        {
+        if is_healthy(port, HEALTH_POLL_TIMEOUT_MS) {
             return true;
         }
         std::thread::sleep(Duration::from_millis(HEALTH_INTERVAL_MS));
@@ -164,7 +179,17 @@ fn show_app_or_diagnostic(win: &WebviewWindow, healthy: bool, port: u16) {
         format!("diagnostic.html?port={port}")
     };
     if let Ok(url) = target.parse() {
-        let _ = win.navigate(url);
+        if win.navigate(url).is_ok() {
+            let _ = win.show();
+            let _ = win.set_focus();
+            return;
+        }
+    }
+
+    // If native navigation misses the window readiness moment, let the
+    // currently loaded bootstrap page perform the same transition.
+    if let Ok(js_target) = serde_json::to_string(&target) {
+        let _ = win.eval(&format!("window.location.replace({js_target});"));
     }
     let _ = win.show();
     let _ = win.set_focus();
@@ -227,6 +252,17 @@ fn restart_service(app: AppHandle) {
     start_backend(&app);
 }
 
+#[tauri::command]
+fn backend_status(app: AppHandle) -> BackendStatus {
+    let port = current_port(&app);
+    let healthy = is_healthy(port, HEALTH_STATUS_TIMEOUT_MS);
+    BackendStatus {
+        port,
+        healthy,
+        url: healthy.then(|| format!("http://127.0.0.1:{port}/")),
+    }
+}
+
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let show = MenuItemBuilder::with_id("show", "Show").build(app)?;
     let hide = MenuItemBuilder::with_id("hide", "Hide").build(app)?;
@@ -279,7 +315,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![]),
         ))
-        .invoke_handler(tauri::generate_handler![restart_service])
+        .invoke_handler(tauri::generate_handler![restart_service, backend_status])
         .manage(AppState::default())
         .setup(|app| {
             let handle = app.handle();

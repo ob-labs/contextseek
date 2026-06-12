@@ -63,8 +63,7 @@ def _get_default_env_file() -> str | None:
     explicit = os.environ.get("CONTEXTSEEK_CONFIG", "").strip()
     if explicit:
         p = Path(explicit).expanduser()
-        if p.is_file():
-            return str(p)
+        return str(p)
 
     project_root = Path(__file__).resolve().parents[3]
     candidates = (

@@ -88,12 +88,41 @@ def _configure_storage(data_dir: Path) -> str:
     return backend
 
 
+def _ensure_desktop_config(data_dir: Path) -> None:
+    """Ensure the desktop app has a writable config.env file."""
+    config_path = Path(
+        os.environ.get("CONTEXTSEEK_CONFIG", data_dir / "config.env")
+    ).expanduser()
+    os.environ.setdefault("CONTEXTSEEK_CONFIG", str(config_path))
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    if config_path.exists():
+        return
+
+    default_sqlite = data_dir / "contextseek.sqlite3"
+    config_path.write_text(
+        "\n".join(
+            [
+                "# ContextSeek desktop configuration",
+                "STORAGE_BACKEND=sqlite",
+                f"SQLITE_PATH={default_sqlite}",
+                "LLM_PROVIDER=none",
+                "LLM_MODEL=none",
+                "EMBEDDING_PROVIDER=none",
+                "EMBEDDING_MODEL=none",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def run_desktop_server(args: argparse.Namespace) -> int:
     """Launch uvicorn serving the same-origin (API + SPA) app."""
     data_dir = (
         Path(args.data_dir).expanduser() if args.data_dir else _default_data_dir()
     )
     data_dir.mkdir(parents=True, exist_ok=True)
+    _ensure_desktop_config(data_dir)
 
     backend = _configure_storage(data_dir)
 

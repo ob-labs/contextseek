@@ -33,10 +33,34 @@
     <script>
       // The Host navigates this window to the local server once /health passes,
       // or to diagnostic.html on failure. If the sidecar dies later, show a hint.
+      const hint = document.querySelector(".hint");
       window.addEventListener("sidecar-down", function () {
-        document.querySelector(".hint").textContent =
-          "Local service stopped. Attempting to recover…";
+        hint.textContent = "Local service stopped. Attempting to recover…";
       });
+
+      async function pollBackend() {
+        const invoke = window.__TAURI__?.core?.invoke;
+        if (typeof invoke !== "function") {
+          window.setTimeout(pollBackend, 500);
+          return;
+        }
+
+        try {
+          const status = await invoke("backend_status");
+          if (status?.healthy && status.url) {
+            window.location.replace(status.url);
+            return;
+          }
+          if (status?.port) {
+            hint.textContent = "Starting local service…";
+          }
+        } catch {
+          // The Rust side is still wiring IPC or the service is not ready yet.
+        }
+        window.setTimeout(pollBackend, 700);
+      }
+
+      pollBackend();
     </script>
   </body>
 </html>

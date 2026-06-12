@@ -259,10 +259,17 @@ def _update_env_file(updates: dict[str, str]) -> None:
 
     env_file = _get_default_env_file()
     if env_file is None:
-        raise FileNotFoundError("No .env config file found to update.")
+        # Web/dev servers may be launched without running `contextseek init`.
+        # In that case, create the same CWD .env file that settings discovery
+        # already prioritizes on the next reload.
+        env_file = str(Path.cwd() / ".env")
 
     env_path = Path(env_file)
-    lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    else:
+        lines = []
 
     def _set_line(lines: list[str], key: str, value: str) -> list[str]:
         prefix = f"{key}="

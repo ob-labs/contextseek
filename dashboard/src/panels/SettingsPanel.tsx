@@ -33,6 +33,13 @@ import type { Config, ConfigUpdateRequest, Health } from "@/lib/types";
 
 const HEALTH_POLL_MS = 15_000;
 
+function isDesktopApp() {
+  const maybeWindow = window as Window & {
+    __TAURI__?: { core?: { invoke?: unknown } };
+  };
+  return Boolean(maybeWindow.__TAURI__?.core?.invoke);
+}
+
 function SettingsGroup({
   icon: Icon,
   title,
@@ -355,6 +362,9 @@ export function SettingsPanel() {
   // ── 存储分组只读行 ─────────────────────────────────────────────────────────
   const val = (v: string | undefined) => (config ? v || "—" : "…");
   const dbBackend = effectiveBackend;
+  const storageBackendOptions = isDesktopApp()
+    ? ["memory", "file", "sqlite", "oceanbase"]
+    : ["memory", "file", "sqlite", "seekdb", "oceanbase"];
   const seekdbMode = config?.seekdb_mode ?? "embedded";
   const currentLlmProvider =
     config?.llm_provider ?? (config?.llm_model === "none" ? "none" : "langchain");
@@ -585,11 +595,11 @@ export function SettingsPanel() {
                   });
                 }}
               >
-                <option value="memory">memory</option>
-                <option value="file">file</option>
-                <option value="sqlite">sqlite</option>
-                <option value="seekdb">seekdb</option>
-                <option value="oceanbase">oceanbase</option>
+                {storageBackendOptions.map((backend) => (
+                  <option key={backend} value={backend}>
+                    {backend}
+                  </option>
+                ))}
               </select>
             </div>
           )}
