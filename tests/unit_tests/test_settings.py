@@ -216,8 +216,9 @@ class TestFactory:
         mock_cls = MagicMock(return_value=mock_embeddings)
 
         with (
-            patch("contextseek.config.factory._import_class", return_value=mock_cls)
-            as import_class,
+            patch(
+                "contextseek.config.factory._import_class", return_value=mock_cls
+            ) as import_class,
             patch(
                 "contextseek.embedders.langchain_embedder.LangChainEmbedder",
                 self._fake_langchain_embedder(),
@@ -268,8 +269,9 @@ class TestFactory:
         mock_cls = MagicMock(return_value=mock_embeddings)
 
         with (
-            patch("contextseek.config.factory._import_class", return_value=mock_cls)
-            as import_class,
+            patch(
+                "contextseek.config.factory._import_class", return_value=mock_cls
+            ) as import_class,
             patch(
                 "contextseek.embedders.langchain_embedder.LangChainEmbedder",
                 self._fake_langchain_embedder(),
@@ -320,7 +322,9 @@ class TestFactory:
         mock_llm = MagicMock()
         mock_cls = MagicMock(return_value=mock_llm)
 
-        with patch("contextseek.config.factory._import_class", return_value=mock_cls) as import_class:
+        with patch(
+            "contextseek.config.factory._import_class", return_value=mock_cls
+        ) as import_class:
             llm = build_llm(
                 LLMSettings(
                     provider="dashscope",
@@ -331,7 +335,9 @@ class TestFactory:
             )
 
         assert llm is mock_llm
-        import_class.assert_called_once_with("langchain_community.chat_models.ChatTongyi")
+        import_class.assert_called_once_with(
+            "langchain_community.chat_models.ChatTongyi"
+        )
         mock_cls.assert_called_once_with(
             temperature=0.0,
             model="qwen-plus",
@@ -343,7 +349,9 @@ class TestFactory:
         mock_llm = MagicMock()
         mock_cls = MagicMock(return_value=mock_llm)
 
-        with patch("contextseek.config.factory._import_class", return_value=mock_cls) as import_class:
+        with patch(
+            "contextseek.config.factory._import_class", return_value=mock_cls
+        ) as import_class:
             llm = build_llm(
                 LLMSettings(
                     provider="openai",
