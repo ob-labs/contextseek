@@ -8,6 +8,10 @@
 
 面向 AI Agent 的语义上下文基础设施。[English](README.md)
 
+## 系统设计
+
+![ContextSeek 系统设计图（持续迭代中）](docs/zh/images/contextseek.png)
+
 ## 概述
 
 Agent 的自进化沿两条技术路线展开：其一，从运行行为中抽取并固化经验（如 [Hermes](https://github.com/NousResearch/hermes-agent)、[OpenHuman](https://github.com/tinyhumansai/openhuman)）；其二，不改造 Agent 执行逻辑，而演进其依赖的**上下文基础设施**——实现自动组织、持续更新与关联发现。ContextSeek 聚焦后一路径，将能力增益从任务级一次性收益，转化为上下文层的跨周期复合累积；异构 Agent 系统据此接入统一语义层，共享检索、溯源与演进能力。

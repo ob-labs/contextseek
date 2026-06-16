@@ -1,5 +1,4 @@
 # ContextSeek
-
 [![PyPI version](https://img.shields.io/pypi/v/contextseek)](https://pypi.org/project/contextseek/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/contextseek)](https://img.shields.io/pypi/dm/contextseek)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://pypi.org/project/contextseek/)
@@ -7,6 +6,10 @@
 [![Discord](https://img.shields.io/badge/Discord-community-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/74cF8vbNEs)
 
 Semantic context infrastructure for AI agents. [中文文档](README_CN.md)
+
+## System Design
+
+![ContextSeek system design diagram (work in progress)](docs/en/images/contextseek.png)
 
 ## Overview
 
