@@ -55,6 +55,16 @@ def _resolve_scope(args: argparse.Namespace, default_scope: str) -> str:
     return scope
 
 
+def _positive_int(value: str) -> int:
+    """Validate and parse a positive integer (> 0)."""
+    n = int(value)
+    if n <= 0:
+        raise argparse.ArgumentTypeError(
+            f"invalid positive int value: {value!r} (must be > 0)"
+        )
+    return n
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build CLI parser for commands."""
     parser = argparse.ArgumentParser(prog="contextseek")
@@ -73,7 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     retrieve_parser.add_argument("--scope", default=None)
     retrieve_parser.add_argument("--query", required=True)
-    retrieve_parser.add_argument("--k", type=int, default=10)
+    retrieve_parser.add_argument("--k", type=_positive_int, default=10)
     retrieve_parser.add_argument(
         "--full",
         action="store_true",
