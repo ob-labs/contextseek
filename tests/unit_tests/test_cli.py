@@ -39,9 +39,7 @@ class TestRetrieveKValidation:
         parser = build_parser()
         err = StringIO()
         with redirect_stderr(err), pytest.raises(SystemExit):
-            parser.parse_args(
-                ["retrieve", "--scope", "t", "--query", "q", "--k", "-1"]
-            )
+            parser.parse_args(["retrieve", "--scope", "t", "--query", "q", "--k", "-1"])
         assert "must be > 0" in err.getvalue()
 
     def test_k_positive_accepted(self) -> None:
