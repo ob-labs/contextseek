@@ -8,9 +8,13 @@ so users without LangChain installed incur no import cost.
 from __future__ import annotations
 
 import importlib
-from typing import Any, Callable
+import os
+import re
+from dataclasses import dataclass
+from typing import Any, Callable, Literal
 
 from contextseek.config.settings import (
+    ContextSeekSettings,
     EmbeddingSettings,
     LLMSettings,
     SummarizerSettings,
@@ -28,6 +32,26 @@ _LLM_PROVIDERS: dict[str, str] = {
     "dashscope": "langchain_community.chat_models.ChatTongyi",
     "ollama": "langchain_ollama.ChatOllama",
 }
+
+DoctorStatus = Literal["PASS", "FAIL", "SKIP"]
+
+_SECRET_KEY_PARTS = ("KEY", "PASSWORD", "SECRET", "TOKEN")
+_OPENAI_LIKE_SECRET_RE = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{6,}\b")
+_URL_USERINFO_RE = re.compile(r"([a-z][a-z0-9+.-]*://)[^/?#\s@]+@")
+_SECRET_QUERY_PARAM_RE = re.compile(
+    r"([?&](?:api[_-]?key|access[_-]?token|token|password|secret)=)[^&#\s]+",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class DoctorCheck:
+    """One ``contextseek doctor`` diagnostic result."""
+
+    component: str
+    status: DoctorStatus
+    summary: str
+    hint: str = ""
 
 
 def _import_class(class_path: str) -> type:
@@ -217,9 +241,230 @@ def build_summarizer(
     return None
 
 
+def _is_secret_key(key: str) -> bool:
+    upper = key.upper()
+    return any(part in upper for part in _SECRET_KEY_PARTS)
+
+
+def _collect_secret_values(value: Any, *, key: str = "") -> set[str]:
+    """Collect configured secret values without exposing their names or payloads."""
+    secrets: set[str] = set()
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            child_key_str = str(child_key)
+            if _is_secret_key(child_key_str) and isinstance(child_value, str):
+                if child_value:
+                    secrets.add(child_value)
+            secrets.update(_collect_secret_values(child_value, key=child_key_str))
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            secrets.update(_collect_secret_values(item, key=key))
+    elif _is_secret_key(key) and isinstance(value, str) and value:
+        secrets.add(value)
+    return secrets
+
+
+def _env_secret_values() -> set[str]:
+    return {
+        value
+        for key, value in os.environ.items()
+        if _is_secret_key(key) and isinstance(value, str) and value
+    }
+
+
+def redact_diagnostic_text(
+    text: str, settings: ContextSeekSettings | None = None
+) -> str:
+    """Remove known secret values from diagnostic output."""
+    redacted = text
+    secrets = _env_secret_values()
+    if settings is not None:
+        try:
+            secrets.update(_collect_secret_values(settings.model_dump()))
+        except Exception:
+            pass
+
+    for secret in sorted(secrets, key=len, reverse=True):
+        if len(secret) >= 3:
+            redacted = redacted.replace(secret, "***")
+    redacted = _URL_USERINFO_RE.sub(r"\1***@", redacted)
+    redacted = _SECRET_QUERY_PARAM_RE.sub(r"\1***", redacted)
+    return _OPENAI_LIKE_SECRET_RE.sub("***", redacted)
+
+
+def _model_summary(settings: Any, *, include_dims: bool = False) -> str:
+    parts = [f"provider={settings.provider}"]
+    if getattr(settings, "class_path", ""):
+        parts.append(f"class_path={settings.class_path}")
+    if getattr(settings, "model", ""):
+        parts.append(f"model={settings.model}")
+    if include_dims and getattr(settings, "dims", 0):
+        parts.append(f"dims={settings.dims}")
+    if getattr(settings, "base_url", ""):
+        parts.append(f"base_url={settings.base_url}")
+    return " ".join(parts)
+
+
+def _embedding_summary(settings: EmbeddingSettings) -> str:
+    parts = [f"provider={settings.provider}"]
+    try:
+        resolved = _resolve_embedding_provider(settings)
+    except Exception:
+        return _model_summary(settings, include_dims=True)
+
+    if resolved is not None:
+        class_path, dims = resolved
+        parts.append(f"class_path={class_path}")
+        if dims:
+            parts.append(f"dims={dims}")
+    elif settings.class_path:
+        parts.append(f"class_path={settings.class_path}")
+    if settings.model:
+        parts.append(f"model={settings.model}")
+    if settings.base_url:
+        parts.append(f"base_url={settings.base_url}")
+    return " ".join(parts)
+
+
+def _llm_summary(settings: LLMSettings) -> str:
+    parts = [f"provider={settings.provider}"]
+    try:
+        class_path = _resolve_llm_provider(settings)
+    except Exception:
+        return _model_summary(settings)
+
+    if class_path is not None:
+        parts.append(f"class_path={class_path}")
+    elif settings.class_path:
+        parts.append(f"class_path={settings.class_path}")
+    if settings.model:
+        parts.append(f"model={settings.model}")
+    if settings.base_url:
+        parts.append(f"base_url={settings.base_url}")
+    return " ".join(parts)
+
+
+def _check_storage(settings: ContextSeekSettings) -> DoctorCheck:
+    summary = f"backend={settings.storage.backend}"
+    try:
+        from contextseek.client.contextseek import _build_adapter_from_settings
+
+        adapter = _build_adapter_from_settings(settings)
+        adapter.ls(settings.storage.uri_scheme)
+    except Exception as exc:  # noqa: BLE001 - diagnostics should report all failures.
+        return DoctorCheck(
+            component="storage",
+            status="FAIL",
+            summary=f"{summary} failed: {redact_diagnostic_text(str(exc), settings)}",
+            hint="Check STORAGE_* and backend-specific values in .env.example.",
+        )
+    return DoctorCheck(
+        component="storage",
+        status="PASS",
+        summary=f"{summary} initialized and listed successfully",
+    )
+
+
+def _check_embedding(settings: ContextSeekSettings) -> DoctorCheck:
+    provider = _normalize_provider(settings.embedding.provider)
+    summary = _embedding_summary(settings.embedding)
+    if provider in {"", "none"}:
+        return DoctorCheck(
+            component="embedding",
+            status="SKIP",
+            summary=summary,
+        )
+
+    try:
+        embedder = build_embedder(settings.embedding)
+        if embedder is None:
+            raise ValueError(
+                "EMBEDDING_CLASS_PATH is required when EMBEDDING_PROVIDER=langchain"
+            )
+        vector = embedder("contextseek doctor ping")
+        if not isinstance(vector, list) or not vector:
+            raise RuntimeError("embedding probe returned an empty vector")
+    except Exception as exc:  # noqa: BLE001 - diagnostics should report all failures.
+        return DoctorCheck(
+            component="embedding",
+            status="FAIL",
+            summary=f"{summary} failed: {redact_diagnostic_text(str(exc), settings)}",
+            hint="Check EMBEDDING_* and provider credentials in .env.example.",
+        )
+
+    return DoctorCheck(
+        component="embedding",
+        status="PASS",
+        summary=f"{summary} probe_dims={len(vector)}",
+    )
+
+
+def _invoke_llm_probe(llm: Any) -> str:
+    try:
+        from langchain_core.messages import HumanMessage
+
+        prompt: Any = [HumanMessage(content="Reply with exactly: OK")]
+    except Exception:
+        prompt = "Reply with exactly: OK"
+
+    resp = llm.invoke(prompt)
+    from contextseek.llm.client import coerce_response_text
+
+    return coerce_response_text(resp).strip()
+
+
+def _check_llm(settings: ContextSeekSettings) -> DoctorCheck:
+    provider = _normalize_provider(settings.llm.provider)
+    summary = _llm_summary(settings.llm)
+    if provider in {"", "none"}:
+        return DoctorCheck(
+            component="llm",
+            status="SKIP",
+            summary=summary,
+        )
+
+    try:
+        llm = build_llm(settings.llm)
+        if llm is None:
+            raise ValueError("LLM_CLASS_PATH is required when LLM_PROVIDER=langchain")
+        text = _invoke_llm_probe(llm)
+        if not text:
+            raise RuntimeError("LLM probe returned an empty response")
+    except Exception as exc:  # noqa: BLE001 - diagnostics should report all failures.
+        return DoctorCheck(
+            component="llm",
+            status="FAIL",
+            summary=f"{summary} failed: {redact_diagnostic_text(str(exc), settings)}",
+            hint="Check LLM_* and provider credentials in .env.example.",
+        )
+
+    return DoctorCheck(
+        component="llm",
+        status="PASS",
+        summary=f"{summary} probe_response={text[:40]!r}",
+    )
+
+
+def run_config_diagnostics(settings: ContextSeekSettings) -> list[DoctorCheck]:
+    """Run lightweight config and component diagnostics for ``contextseek doctor``."""
+    return [
+        DoctorCheck(
+            component="config",
+            status="PASS",
+            summary="loaded ContextSeekSettings",
+        ),
+        _check_storage(settings),
+        _check_embedding(settings),
+        _check_llm(settings),
+    ]
+
+
 __all__ = [
+    "DoctorCheck",
     "build_embedder",
     "build_llm",
     "build_summarizer",
+    "redact_diagnostic_text",
+    "run_config_diagnostics",
     "resolve_embedding_dims",
 ]
