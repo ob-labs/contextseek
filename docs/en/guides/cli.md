@@ -178,13 +178,14 @@ Features:
 | Command | Key args | Description |
 |---------|----------|-------------|
 | `add` | `--content`(req) `--source` `--tags` | Write a context item, returns `{id, stage}` |
-| `retrieve` | `--query`(req) `--k`(10) `--full` `--json` | Ranked SearchHits; L1 summaries by default, `--full` for L0 |
+| `retrieve` | `--query`(req) `--k`(10) `--full` `--json` `--tags` | Ranked SearchHits; L1 summaries by default, `--full` for L0. `--tags a,b` requires returned items to carry all listed tags |
 | `expand` | `--ids`(req, comma-separated) | Expand retrieved ids to L0 full content |
 | `items` | `--stage`(raw/extracted/knowledge/skill) | List all items in a scope |
 
 ```bash
 contextseek add --scope me/work --content "Prefer concise answers" --source cli --tags preference,language
 contextseek retrieve --scope me/work --query "language preference" --k 5
+contextseek retrieve --scope me/work --query "language preference" --tags preference,language
 contextseek retrieve --scope me/work --query "language preference" --k 3 --full
 contextseek expand --scope me/work --ids 1a2b3c,4d5e6f
 contextseek items --scope me/work --stage knowledge

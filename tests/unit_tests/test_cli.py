@@ -53,6 +53,51 @@ class TestRetrieveKValidation:
         assert args.k == 5
 
 
+class TestRetrieveTagFiltering:
+    def test_retrieve_accepts_tags_flag(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            ["retrieve", "--scope", "t", "--query", "q", "--tags", "a,b"]
+        )
+
+        assert args.tags == "a,b"
+
+    def test_retrieve_filters_results_by_all_tags(self) -> None:
+        ctx = ContextSeek()
+        kept = ctx.add(
+            "database backup runbook",
+            scope="t/p",
+            source="test",
+            tags=["ops", "database"],
+        )
+        ctx.add(
+            "database onboarding guide",
+            scope="t/p",
+            source="test",
+            tags=["docs", "database"],
+        )
+        out = StringIO()
+
+        with redirect_stdout(out):
+            code = run_cli(
+                [
+                    "retrieve",
+                    "--scope",
+                    "t/p",
+                    "--query",
+                    "database",
+                    "--tags",
+                    "ops,database",
+                    "--json",
+                ],
+                client=ctx,
+            )
+
+        payload = json.loads(out.getvalue())
+        assert code == 0
+        assert [item["id"] for item in payload["items"]] == [kept.id]
+
+
 class TestExpandOutput:
     def test_expand_reports_missing_ids(self) -> None:
         ctx = ContextSeek()
