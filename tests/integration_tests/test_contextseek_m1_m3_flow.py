@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
-from contextseek.protocols.plugs import PlugMeta, RawEvent
+from contextseek.plugs.core.protocols import PlugMeta, RawEvent
 from contextseek.client.contextseek import ContextSeek
 from contextseek.domain.links import LinkType
 from contextseek.domain.provenance import SourceType

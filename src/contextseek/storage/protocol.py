@@ -97,8 +97,9 @@ class SyncCapableMixin:
     Calling code detects sync capability via ``isinstance(backend, SyncCapableMixin)``
     rather than a rigid class check.
 
-    All methods have safe default no-op implementations so that backends that
-    have not yet created the sync tables remain functional.
+    Sync-table methods keep safe defaults for legacy callers. PlugGateway state
+    methods are different: silent no-op would break idempotency and retry
+    guarantees, so their defaults raise ``NotImplementedError``.
     """
 
     def ensure_sync_table(self) -> None: ...
@@ -124,6 +125,42 @@ class SyncCapableMixin:
 
     def visible_count_for_scope(self, scope: str) -> int:
         return 0
+
+    def ensure_plug_tables(self) -> None:
+        raise NotImplementedError("backend does not implement PlugGateway state")
+
+    def plug_source_get(
+        self, plug_name: str, plug_instance_id: str, external_id: str
+    ) -> dict[str, Any] | None:
+        raise NotImplementedError("backend does not implement PlugGateway state")
+
+    def plug_source_upsert(self, record: dict[str, Any]) -> None:
+        raise NotImplementedError("backend does not implement PlugGateway state")
+
+    def plug_outbox_get(self, event_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError("backend does not implement PlugGateway state")
+
+    def plug_outbox_upsert(self, record: dict[str, Any]) -> bool:
+        raise NotImplementedError("backend does not implement PlugGateway state")
+
+    def plug_outbox_update_status(
+        self,
+        event_id: str,
+        *,
+        status: str,
+        materialized_context_item_id: str | None = None,
+        last_error: str | None = None,
+        increment_retry: bool = False,
+    ) -> None:
+        raise NotImplementedError("backend does not implement PlugGateway state")
+
+    def plug_outbox_requeue_dead(self, event_id: str) -> bool:
+        raise NotImplementedError("backend does not implement PlugGateway state")
+
+    def plug_outbox_list_retryable(
+        self, *, limit: int = 100, max_retry: int = 3
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError("backend does not implement PlugGateway state")
 
 
 class VectorSearchMixin:

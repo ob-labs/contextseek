@@ -22,7 +22,7 @@ contextseek --help
 
 读取 cwd 或仓库根目录 `.env`（见 [配置](../../getting-started/configuration.md)）。
 
-> 端侧 / 个人模式（`init`、`daemon`、`sync`、嵌入式 seekdb）与命令全表见 **[CLI 命令行（端侧）](../cli.md)**。下面只列常用速查。
+> 端侧 / 个人模式（`init`、`daemon`、`sync`、默认 SQLite）与命令全表见 **[CLI 命令行（端侧）](../cli.md)**。下面只列常用速查。
 
 ### 命令一览
 

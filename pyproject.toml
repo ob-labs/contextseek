@@ -48,6 +48,7 @@ huggingface = ["langchain-huggingface>=0.1.0"]
 oceanbase = ["pyobvector>=0.1.0", "sqlalchemy>=2.0"]
 daemon = ["watchdog>=4.0"]
 seekdb = ["pyseekdb"]
+powermem = ["powermem>=1.1.1"]
 all = [
     "fastapi>=0.110.0", "uvicorn>=0.30.0", "pydantic>=2.7.0",
     "langchain-core>=0.3.0", "langchain>=0.3.0", "langgraph>=0.2.0",
@@ -62,6 +63,8 @@ appworld-eval = ["openai>=1.0.0", "anthropic>=0.30.0"]
 contextseek = "contextseek.cli:main"
 contextseek-mcp-stdio = "contextseek.mcp:run_stdio_server"
 contextseek-mcp-sse = "contextseek.mcp:run_sse_server"
+contextseek-pmem-proxy = "contextseek.plugs.powermem.cli:main"
+contextseek-pmem-mcp-stdio = "contextseek.plugs.powermem.mcp:run_stdio_server"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/contextseek"]
@@ -78,4 +81,12 @@ dev = [
     "langgraph-cli[inmem]>=0.4.26",
     "pytest>=9.0.3",
     "ruff>=0.4.0",
+]
+
+[tool.uv]
+conflicts = [
+    [
+        { extra = "powermem" },
+        { group = "dev" },
+    ],
 ]

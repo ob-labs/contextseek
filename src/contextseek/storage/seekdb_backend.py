@@ -247,6 +247,7 @@ class SeekDBBackend(SyncCapableMixin, BackendProtocol):
             "CREATE TABLE IF NOT EXISTS contextseek_meta "
             "(k VARCHAR(128) NOT NULL, v VARCHAR(512) NOT NULL, PRIMARY KEY (k))"
         )
+        self.ensure_plug_tables()
 
     def meta_get(self, key: str) -> str | None:
         """Return a stored metadata value, or ``None`` when absent."""
@@ -346,6 +347,277 @@ class SeekDBBackend(SyncCapableMixin, BackendProtocol):
             f"('{escape_string(scope)}', '{path_hash}', "
             f"'{escape_string(path)}', {float(mtime)}, '{content_hash}')"
         )
+
+    # ------------------------------------------------------------------
+    # PlugGateway bookkeeping tables
+    # ------------------------------------------------------------------
+
+    def ensure_plug_tables(self) -> None:
+        try:
+            self._sql(
+                "CREATE TABLE IF NOT EXISTS plug_source_records "
+                "(plug_name VARCHAR(128) NOT NULL, "
+                "plug_instance_id VARCHAR(256) NOT NULL, "
+                "external_id VARCHAR(512) NOT NULL, "
+                "current_context_item_id VARCHAR(128), "
+                "content_version_hash VARCHAR(128), "
+                "write_projection_hash VARCHAR(128), "
+                "last_materialization_key VARCHAR(128), "
+                "last_materialized_context_item_id VARCHAR(128), "
+                "status VARCHAR(32) NOT NULL, "
+                "last_operation VARCHAR(32), "
+                "last_seen_at VARCHAR(64), "
+                "last_event_id VARCHAR(128), "
+                "raw_payload_digest VARCHAR(128), "
+                "PRIMARY KEY (plug_name, plug_instance_id, external_id))"
+            )
+            self._sql(
+                "CREATE TABLE IF NOT EXISTS plug_event_outbox "
+                "(event_id VARCHAR(128) NOT NULL, "
+                "plug_name VARCHAR(128) NOT NULL, "
+                "plug_instance_id VARCHAR(256) NOT NULL, "
+                "external_id VARCHAR(512) NOT NULL, "
+                "materialization_key VARCHAR(128) NOT NULL, "
+                "materialized_context_item_id VARCHAR(128), "
+                "event_payload LONGTEXT NOT NULL, "
+                "status VARCHAR(32) NOT NULL, "
+                "retry_count INT NOT NULL, "
+                "last_error LONGTEXT, "
+                "created_at VARCHAR(64) NOT NULL, "
+                "updated_at VARCHAR(64) NOT NULL, "
+                "PRIMARY KEY (event_id))"
+            )
+        except Exception as exc:
+            raise RuntimeError("ensure_plug_tables failed") from exc
+
+    def _esc(self, value: Any) -> str:
+        from pyseekdb.client.sql_utils import escape_string
+
+        return escape_string("" if value is None else str(value))
+
+    @staticmethod
+    def _sql_literal(value: Any) -> str:
+        if value is None:
+            return "NULL"
+        from pyseekdb.client.sql_utils import escape_string
+
+        return f"'{escape_string(str(value))}'"
+
+    def plug_source_get(
+        self, plug_name: str, plug_instance_id: str, external_id: str
+    ) -> dict[str, Any] | None:
+        try:
+            rows = self._sql(
+                "SELECT plug_name, plug_instance_id, external_id, "
+                "current_context_item_id, content_version_hash, write_projection_hash, "
+                "last_materialization_key, last_materialized_context_item_id, status, "
+                "last_operation, last_seen_at, last_event_id, raw_payload_digest "
+                "FROM plug_source_records "
+                f"WHERE plug_name = '{self._esc(plug_name)}' "
+                f"AND plug_instance_id = '{self._esc(plug_instance_id)}' "
+                f"AND external_id = '{self._esc(external_id)}'"
+            )
+        except Exception as exc:
+            raise RuntimeError("plug_source_get failed") from exc
+        if not rows:
+            return None
+        keys = [
+            "plug_name",
+            "plug_instance_id",
+            "external_id",
+            "current_context_item_id",
+            "content_version_hash",
+            "write_projection_hash",
+            "last_materialization_key",
+            "last_materialized_context_item_id",
+            "status",
+            "last_operation",
+            "last_seen_at",
+            "last_event_id",
+            "raw_payload_digest",
+        ]
+        return dict(zip(keys, rows[0]))
+
+    def plug_source_upsert(self, record: dict[str, Any]) -> None:
+        try:
+            now = datetime.now(tz=UTC).isoformat()
+            values = [
+                record["plug_name"],
+                record["plug_instance_id"],
+                record["external_id"],
+                record.get("current_context_item_id"),
+                record.get("content_version_hash"),
+                record.get("write_projection_hash"),
+                record.get("last_materialization_key"),
+                record.get("last_materialized_context_item_id"),
+                record.get("status") or "active",
+                record.get("last_operation"),
+                record.get("last_seen_at") or now,
+                record.get("last_event_id"),
+                record.get("raw_payload_digest"),
+            ]
+            self._sql(
+                "REPLACE INTO plug_source_records "
+                "(plug_name, plug_instance_id, external_id, current_context_item_id, "
+                "content_version_hash, write_projection_hash, last_materialization_key, "
+                "last_materialized_context_item_id, status, last_operation, "
+                "last_seen_at, last_event_id, raw_payload_digest) VALUES "
+                f"({', '.join(self._sql_literal(v) for v in values)})"
+            )
+        except Exception as exc:
+            raise RuntimeError("plug_source_upsert failed") from exc
+
+    def plug_outbox_get(self, event_id: str) -> dict[str, Any] | None:
+        try:
+            rows = self._sql(
+                "SELECT event_id, plug_name, plug_instance_id, external_id, "
+                "materialization_key, materialized_context_item_id, event_payload, "
+                "status, retry_count, last_error, created_at, updated_at "
+                "FROM plug_event_outbox "
+                f"WHERE event_id = '{self._esc(event_id)}'"
+            )
+        except Exception as exc:
+            raise RuntimeError("plug_outbox_get failed") from exc
+        if not rows:
+            return None
+        keys = [
+            "event_id",
+            "plug_name",
+            "plug_instance_id",
+            "external_id",
+            "materialization_key",
+            "materialized_context_item_id",
+            "event_payload",
+            "status",
+            "retry_count",
+            "last_error",
+            "created_at",
+            "updated_at",
+        ]
+        result = dict(zip(keys, rows[0]))
+        try:
+            result["event_payload"] = json.loads(result.get("event_payload") or "{}")
+        except json.JSONDecodeError:
+            result["event_payload"] = {}
+        result["retry_count"] = int(result.get("retry_count") or 0)
+        return result
+
+    def plug_outbox_upsert(self, record: dict[str, Any]) -> bool:
+        try:
+            existing = self.plug_outbox_get(record["event_id"])
+            now = datetime.now(tz=UTC).isoformat()
+            payload = record.get("event_payload") or {}
+            if not isinstance(payload, str):
+                payload = json.dumps(payload, ensure_ascii=False, default=str)
+            if existing is not None:
+                if existing.get("status") in {"applied", "dead"}:
+                    return False
+                self._sql(
+                    "UPDATE plug_event_outbox SET "
+                    f"event_payload = {self._sql_literal(payload)}, "
+                    f"status = {self._sql_literal(record.get('status') or 'pending')}, "
+                    f"retry_count = {int(record.get('retry_count') or 0)}, "
+                    f"last_error = {self._sql_literal(record.get('last_error'))}, "
+                    f"updated_at = {self._sql_literal(record.get('updated_at') or now)} "
+                    f"WHERE event_id = '{self._esc(record['event_id'])}' "
+                    "AND status NOT IN ('applied', 'dead')"
+                )
+                row = self.plug_outbox_get(record["event_id"])
+                return bool(row and row.get("status") not in {"applied", "dead"})
+            values = [
+                record["event_id"],
+                record["plug_name"],
+                record["plug_instance_id"],
+                record["external_id"],
+                record["materialization_key"],
+                record.get("materialized_context_item_id"),
+                payload,
+                record.get("status") or "pending",
+                int(record.get("retry_count") or 0),
+                record.get("last_error"),
+                record.get("created_at") or now,
+                record.get("updated_at") or now,
+            ]
+            self._sql(
+                "INSERT INTO plug_event_outbox "
+                "(event_id, plug_name, plug_instance_id, external_id, "
+                "materialization_key, materialized_context_item_id, event_payload, "
+                "status, retry_count, last_error, created_at, updated_at) VALUES "
+                f"({', '.join(self._sql_literal(v) for v in values)})"
+            )
+            return True
+        except Exception as exc:
+            raise RuntimeError("plug_outbox_upsert failed") from exc
+
+    def plug_outbox_update_status(
+        self,
+        event_id: str,
+        *,
+        status: str,
+        materialized_context_item_id: str | None = None,
+        last_error: str | None = None,
+        increment_retry: bool = False,
+    ) -> None:
+        try:
+            now = datetime.now(tz=UTC).isoformat()
+            retry_expr = "retry_count + 1" if increment_retry else "retry_count"
+            materialized_expr = (
+                self._sql_literal(materialized_context_item_id)
+                if materialized_context_item_id is not None
+                else "materialized_context_item_id"
+            )
+            self._sql(
+                "UPDATE plug_event_outbox SET "
+                f"status = {self._sql_literal(status)}, "
+                f"materialized_context_item_id = {materialized_expr}, "
+                f"last_error = {self._sql_literal(last_error)}, "
+                f"retry_count = {retry_expr}, "
+                f"updated_at = {self._sql_literal(now)} "
+                f"WHERE event_id = '{self._esc(event_id)}'"
+            )
+        except Exception as exc:
+            raise RuntimeError("plug_outbox_update_status failed") from exc
+
+    def plug_outbox_requeue_dead(self, event_id: str) -> bool:
+        try:
+            now = datetime.now(tz=UTC).isoformat()
+            self._sql(
+                "UPDATE plug_event_outbox SET "
+                "status = 'pending', "
+                "retry_count = 0, "
+                "last_error = NULL, "
+                f"updated_at = {self._sql_literal(now)} "
+                f"WHERE event_id = '{self._esc(event_id)}' AND status = 'dead'"
+            )
+            row = self.plug_outbox_get(event_id)
+            return (
+                row is not None
+                and row.get("status") == "pending"
+                and int(row.get("retry_count") or 0) == 0
+                and row.get("updated_at") == now
+            )
+        except Exception as exc:
+            raise RuntimeError("plug_outbox_requeue_dead failed") from exc
+
+    def plug_outbox_list_retryable(
+        self, *, limit: int = 100, max_retry: int = 3
+    ) -> list[dict[str, Any]]:
+        try:
+            rows = self._sql(
+                "SELECT event_id FROM plug_event_outbox "
+                "WHERE status IN ('pending', 'failed') "
+                f"AND retry_count < {int(max_retry)} "
+                "ORDER BY updated_at ASC "
+                f"LIMIT {int(limit)}"
+            )
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                item = self.plug_outbox_get(row[0])
+                if item is not None:
+                    result.append(item)
+            return result
+        except Exception as exc:
+            raise RuntimeError("plug_outbox_list_retryable failed") from exc
 
     def read(self, path: str, hint: str | None = None) -> FileData:
         result = self._collection.get(ids=[path], include=["metadatas"])

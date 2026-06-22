@@ -1,6 +1,6 @@
 # CLI 命令行（端侧 / 个人模式）
 
-`contextseek` 命令行是 ContextSeek 的端侧入口：在本机用嵌入式 `seekdb` 跑一个零依赖的个人知识库，配合后台 `daemon` 自动演进、自动同步笔记，并把同一套能力通过 MCP 暴露给 Claude Desktop、Cursor 等工具。
+`contextseek` 命令行是 ContextSeek 的端侧入口：默认用本地 SQLite 跑一个零依赖的个人知识库，配合后台 `daemon` 自动演进、自动同步笔记，并把同一套能力通过 MCP 暴露给 Claude Desktop、Cursor 等工具。
 
 所有命令底层都是同一个 `ContextSeek` 客户端逻辑；CLI、SDK、HTTP、MCP 四条通路完全等价（见 [MCP / HTTP / CLI](integrations/mcp-http-cli.md)）。
 
@@ -9,11 +9,11 @@
 ## 安装
 
 ```bash
-# 端侧推荐：嵌入式 seekdb（无需外部服务）
-pip install "contextseek[seekdb]"
+# 端侧默认：SQLite（无需外部服务 / 原生引擎）
+pip install contextseek
 
 # 如需后台文件监听（daemon 的 WATCH_PATHS 自动同步）
-pip install "contextseek[seekdb,daemon]"
+pip install "contextseek[daemon]"
 
 # 一次装齐（含 HTTP / MCP / LangChain / seekdb / watchdog）
 pip install "contextseek[all]"
@@ -51,7 +51,7 @@ contextseek retrieve --scope me/work --query "代码评审规范"
 contextseek overview --scope me/work
 ```
 
-> 第一次 `add` / `retrieve` 会触发内置 embedding 模型（`all-MiniLM-L6-v2`，ONNX）下载与加载，属正常现象。
+> 默认 SQLite 配置不需要 embedding；配置 `EMBEDDING_*` 后可启用向量检索。
 
 ---
 
@@ -63,7 +63,7 @@ contextseek overview --scope me/work
 ~/.contextseek/
 ├── config.env            # 端侧配置（等价于项目里的 .env）
 ├── mcp.json              # 可粘贴进 AI 工具的 MCP 配置片段
-├── seekdb.db             # 嵌入式 seekdb 数据文件
+├── contextseek.sqlite3   # SQLite 数据文件
 ├── daemon.pid            # 后台进程 PID
 ├── daemon.status.json    # 后台组件状态
 ├── logs/
@@ -78,14 +78,14 @@ contextseek overview --scope me/work
 
 | 键 | 默认 | 说明 |
 |----|------|------|
-| `STORAGE_BACKEND` | `seekdb` | 嵌入式模式填写 `seekdb`；seekdb server mode 填写 `oceanbase` |
-| `SEEKDB_PATH` | `~/.contextseek/seekdb.db` | 嵌入式数据文件 |
-| `SEEKDB_HOST` / `SEEKDB_PORT` | — | 取消注释切换到 seekdb server 模式；仅 server mode 需要使用 `STORAGE_BACKEND=oceanbase` |
+| `STORAGE_BACKEND` | `sqlite` | 默认本地 SQLite；seekdb server mode 填写 `oceanbase` |
+| `SQLITE_PATH` | `~/.contextseek/contextseek.sqlite3` | SQLite 数据文件 |
+| `SEEKDB_PATH` / `SEEKDB_HOST` / `SEEKDB_PORT` | — | 可选 seekdb 配置；server mode 使用 `STORAGE_BACKEND=oceanbase` |
 | `DEFAULT_SCOPE` | `me/work` | 省略 `--scope` 时使用的默认 scope |
 | `EVOLUTION_ENABLED` | `true` | 是否开启自动演进 |
 | `LIFECYCLE_INTERVAL_SECONDS` | `3600` | daemon 自动演进周期（秒） |
 | `WATCH_PATHS` | — | `~/notes:me/work,~/docs:me/research` 形式的「目录:scope」列表 |
-| `EMBEDDING_*` | 内置 ONNX | 可切 OpenAI 等 embedding |
+| `EMBEDDING_*` | — | 可选；配置后启用向量检索 |
 | `LLM_*` | — | 可选；配置后演进质量更高（无 LLM 也能跑） |
 | `SKILL_EXPORT_ENABLED` / `_DIR` / `_MIN_CONFIDENCE` | `false` / `~/.contextseek/skills` / `0.8` | daemon 每轮演进后把 skill 物化为 `SKILL.md` |
 

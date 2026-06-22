@@ -7,6 +7,8 @@ storage gating, throttled compact, and helper correctness.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -766,6 +768,32 @@ class TestHelpers:
 import asyncio  # noqa: E402  — kept local to async test block
 
 
+def _asyncio_to_thread_available() -> bool:
+    code = (
+        "import asyncio\n"
+        "async def main():\n"
+        "    await asyncio.wait_for(asyncio.to_thread(lambda: 1), timeout=1)\n"
+        "asyncio.run(main())\n"
+    )
+    try:
+        return (
+            subprocess.run(
+                [sys.executable, "-c", code],
+                timeout=3,
+                check=False,
+                capture_output=True,
+                text=True,
+            ).returncode
+            == 0
+        )
+    except subprocess.TimeoutExpired:
+        return False
+
+
+@pytest.mark.skipif(
+    not _asyncio_to_thread_available(),
+    reason="asyncio.to_thread does not complete in this Python environment",
+)
 class TestAsyncWrappers:
     def test_aafter_model_offloads_to_thread(self) -> None:
         """``aafter_model`` runs ``ctx.add`` on a worker thread, not the loop."""

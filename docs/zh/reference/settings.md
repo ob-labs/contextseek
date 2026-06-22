@@ -1,6 +1,6 @@
 # 配置项参考
 
-所有配置均通过环境变量和可选的 `.env` 文件加载。零配置默认为内存存储 + 仅关键词检索，无需任何 API Key。
+所有配置均通过环境变量和可选的 `.env` 文件加载。零配置默认为本地 SQLite 存储 + 仅关键词检索，无需任何 API Key。
 
 将 `.env.example` 复制为 `.env` 并编辑。`.env` 的解析顺序和代码构造方式见[配置](../getting-started/configuration.md)。
 
@@ -10,8 +10,9 @@
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `STORAGE_BACKEND` | `memory` | 存储后端：`memory` 或 `file` |
+| `STORAGE_BACKEND` | `sqlite` | 存储后端：`sqlite`、`memory`、`file`、`seekdb` 或 `oceanbase` |
 | `STORAGE_PATH` | `.contextseek/store` | `backend=file` 时的根目录 |
+| `SQLITE_PATH` | `~/.contextseek/contextseek.sqlite3` | `backend=sqlite` 时的 SQLite 文件 |
 | `STORAGE_URI_SCHEME` | `contextseek://` | Scope 引用的 URI scheme |
 | `STORAGE_COLD_BACKEND` | _(空)_ | 可选冷层后端类型；空值禁用分层存储 |
 | `STORAGE_COLD_PATH` | `.contextseek/cold` | 冷层文件后端根目录 |

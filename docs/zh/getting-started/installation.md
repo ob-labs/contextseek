@@ -1,6 +1,6 @@
 # 安装
 
-ContextSeek 需要 **Python 3.11、3.12 或 3.13**。核心 wheel 包含 SDK、CLI 与 MCP 入口；默认内存后端**不需要**任何 API Key。
+ContextSeek 需要 **Python 3.11、3.12 或 3.13**。核心 wheel 包含 SDK、CLI 与 MCP 入口；默认 SQLite 后端**不需要**任何 API Key。
 
 ## 系统要求
 
@@ -8,7 +8,7 @@ ContextSeek 需要 **Python 3.11、3.12 或 3.13**。核心 wheel 包含 SDK、C
 |------|------|
 | Python | ≥ 3.11 |
 | 操作系统 | Linux、macOS、Windows（生产环境建议 WSL） |
-| 磁盘 | `memory` 几乎可忽略；`file` 需规划 `STORAGE_PATH` 容量 |
+| 磁盘 | 默认 SQLite 使用 `SQLITE_PATH`；`file` 需规划 `STORAGE_PATH` 容量 |
 | 网络 | 仅在使用远程 Embedding/LLM 或 OceanBase 时需要 |
 
 ## 从 PyPI 安装

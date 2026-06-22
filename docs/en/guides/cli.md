@@ -1,6 +1,6 @@
 # CLI (Client-side / Personal mode)
 
-The `contextseek` CLI is ContextSeek's client-side entry point: run a zero-dependency personal knowledge base on your own machine with the embedded `seekdb` backend, let a background `daemon` auto-evolve and auto-sync your notes, and expose the same capabilities to Claude Desktop, Cursor, and other tools over MCP.
+The `contextseek` CLI is ContextSeek's client-side entry point: run a zero-dependency personal knowledge base on your own machine with local SQLite by default, let a background `daemon` auto-evolve and auto-sync your notes, and expose the same capabilities to Claude Desktop, Cursor, and other tools over MCP.
 
 Every command runs on the same `ContextSeek` client logic underneath — the CLI, SDK, HTTP, and MCP paths are fully equivalent (see [MCP / HTTP / CLI](integrations/mcp-http-cli.md)).
 
@@ -9,11 +9,11 @@ Every command runs on the same `ContextSeek` client logic underneath — the CLI
 ## Install
 
 ```bash
-# Recommended for client-side use: embedded seekdb (no external service)
-pip install "contextseek[seekdb]"
+# Default client-side use: SQLite (no external service / native engine)
+pip install contextseek
 
 # Add background file watching (daemon's WATCH_PATHS auto-sync)
-pip install "contextseek[seekdb,daemon]"
+pip install "contextseek[daemon]"
 
 # Everything (HTTP / MCP / LangChain / seekdb / watchdog)
 pip install "contextseek[all]"
@@ -51,7 +51,7 @@ contextseek retrieve --scope me/work --query "code review convention"
 contextseek overview --scope me/work
 ```
 
-> The first `add` / `retrieve` triggers download and load of the built-in embedding model (`all-MiniLM-L6-v2`, ONNX). This is expected.
+> The default SQLite configuration does not require embeddings; configure `EMBEDDING_*` to enable vector retrieval.
 
 ---
 
@@ -63,7 +63,7 @@ contextseek overview --scope me/work
 ~/.contextseek/
 ├── config.env            # client-side config (equivalent to a project .env)
 ├── mcp.json              # MCP snippet to paste into your AI tool
-├── seekdb.db             # embedded seekdb data file
+├── contextseek.sqlite3   # SQLite data file
 ├── daemon.pid            # background process PID
 ├── daemon.status.json    # background component state
 ├── logs/
@@ -78,14 +78,14 @@ The config location can be overridden with the `CONTEXTSEEK_CONFIG` environment 
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `STORAGE_BACKEND` | `seekdb` | Use `seekdb` for embedded mode; use `oceanbase` for seekdb server mode |
-| `SEEKDB_PATH` | `~/.contextseek/seekdb.db` | Embedded data file |
-| `SEEKDB_HOST` / `SEEKDB_PORT` | — | Uncomment to switch to seekdb server mode; only server mode uses `STORAGE_BACKEND=oceanbase` |
+| `STORAGE_BACKEND` | `sqlite` | Default local SQLite; use `oceanbase` for seekdb server mode |
+| `SQLITE_PATH` | `~/.contextseek/contextseek.sqlite3` | SQLite data file |
+| `SEEKDB_PATH` / `SEEKDB_HOST` / `SEEKDB_PORT` | — | Optional seekdb settings; server mode uses `STORAGE_BACKEND=oceanbase` |
 | `DEFAULT_SCOPE` | `me/work` | Scope used when `--scope` is omitted |
 | `EVOLUTION_ENABLED` | `true` | Whether auto-evolution runs |
 | `LIFECYCLE_INTERVAL_SECONDS` | `3600` | Daemon auto-evolution period (seconds) |
 | `WATCH_PATHS` | — | `~/notes:me/work,~/docs:me/research` list of `dir:scope` pairs |
-| `EMBEDDING_*` | built-in ONNX | Switch to OpenAI etc. |
+| `EMBEDDING_*` | — | Optional; enables vector retrieval when configured |
 | `LLM_*` | — | Optional; improves evolution quality (works without an LLM) |
 | `SKILL_EXPORT_ENABLED` / `_DIR` / `_MIN_CONFIDENCE` | `false` / `~/.contextseek/skills` / `0.8` | Daemon materializes skills as `SKILL.md` after each evolution cycle |
 

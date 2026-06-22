@@ -128,6 +128,7 @@ class SQLiteBackend(SyncCapableMixin, BackendProtocol):
             )
             self._init_fts()
             self.ensure_sync_table()
+            self.ensure_plug_tables()
             self._conn.commit()
 
     def _init_fts(self) -> None:
@@ -688,6 +689,226 @@ class SQLiteBackend(SyncCapableMixin, BackendProtocol):
                 (scope,),
             ).fetchone()
         return int(row[0]) if row else 0
+
+    # ------------------------------------------------------------------
+    # PlugGateway bookkeeping tables
+    # ------------------------------------------------------------------
+
+    def ensure_plug_tables(self) -> None:
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS plug_source_records ("
+            "plug_name TEXT NOT NULL, "
+            "plug_instance_id TEXT NOT NULL, "
+            "external_id TEXT NOT NULL, "
+            "current_context_item_id TEXT, "
+            "content_version_hash TEXT, "
+            "write_projection_hash TEXT, "
+            "last_materialization_key TEXT, "
+            "last_materialized_context_item_id TEXT, "
+            "status TEXT NOT NULL, "
+            "last_operation TEXT, "
+            "last_seen_at TEXT, "
+            "last_event_id TEXT, "
+            "raw_payload_digest TEXT, "
+            "PRIMARY KEY (plug_name, plug_instance_id, external_id))"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS plug_event_outbox ("
+            "event_id TEXT PRIMARY KEY, "
+            "plug_name TEXT NOT NULL, "
+            "plug_instance_id TEXT NOT NULL, "
+            "external_id TEXT NOT NULL, "
+            "materialization_key TEXT NOT NULL, "
+            "materialized_context_item_id TEXT, "
+            "event_payload TEXT NOT NULL, "
+            "status TEXT NOT NULL, "
+            "retry_count INTEGER NOT NULL DEFAULT 0, "
+            "last_error TEXT, "
+            "created_at TEXT NOT NULL, "
+            "updated_at TEXT NOT NULL)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_plug_outbox_status "
+            "ON plug_event_outbox(status, retry_count, updated_at)"
+        )
+
+    def plug_source_get(
+        self, plug_name: str, plug_instance_id: str, external_id: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            self._db.row_factory = sqlite3.Row
+            row = self._db.execute(
+                "SELECT * FROM plug_source_records "
+                "WHERE plug_name = ? AND plug_instance_id = ? AND external_id = ?",
+                (plug_name, plug_instance_id, external_id),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def plug_source_upsert(self, record: dict[str, Any]) -> None:
+        now = datetime.now(tz=UTC).isoformat()
+        values = {
+            "plug_name": record["plug_name"],
+            "plug_instance_id": record["plug_instance_id"],
+            "external_id": record["external_id"],
+            "current_context_item_id": record.get("current_context_item_id"),
+            "content_version_hash": record.get("content_version_hash"),
+            "write_projection_hash": record.get("write_projection_hash"),
+            "last_materialization_key": record.get("last_materialization_key"),
+            "last_materialized_context_item_id": record.get(
+                "last_materialized_context_item_id"
+            ),
+            "status": record.get("status") or "active",
+            "last_operation": record.get("last_operation"),
+            "last_seen_at": record.get("last_seen_at") or now,
+            "last_event_id": record.get("last_event_id"),
+            "raw_payload_digest": record.get("raw_payload_digest"),
+        }
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO plug_source_records ("
+                "plug_name, plug_instance_id, external_id, "
+                "current_context_item_id, content_version_hash, "
+                "write_projection_hash, last_materialization_key, "
+                "last_materialized_context_item_id, status, last_operation, "
+                "last_seen_at, last_event_id, raw_payload_digest) "
+                "VALUES (:plug_name, :plug_instance_id, :external_id, "
+                ":current_context_item_id, :content_version_hash, "
+                ":write_projection_hash, :last_materialization_key, "
+                ":last_materialized_context_item_id, :status, :last_operation, "
+                ":last_seen_at, :last_event_id, :raw_payload_digest) "
+                "ON CONFLICT(plug_name, plug_instance_id, external_id) DO UPDATE SET "
+                "current_context_item_id=excluded.current_context_item_id, "
+                "content_version_hash=excluded.content_version_hash, "
+                "write_projection_hash=excluded.write_projection_hash, "
+                "last_materialization_key=excluded.last_materialization_key, "
+                "last_materialized_context_item_id=excluded.last_materialized_context_item_id, "
+                "status=excluded.status, last_operation=excluded.last_operation, "
+                "last_seen_at=excluded.last_seen_at, last_event_id=excluded.last_event_id, "
+                "raw_payload_digest=excluded.raw_payload_digest",
+                values,
+            )
+            self._db.commit()
+
+    def plug_outbox_get(self, event_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            self._db.row_factory = sqlite3.Row
+            row = self._db.execute(
+                "SELECT * FROM plug_event_outbox WHERE event_id = ?", (event_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["event_payload"] = json.loads(result.get("event_payload") or "{}")
+        except json.JSONDecodeError:
+            result["event_payload"] = {}
+        return result
+
+    def plug_outbox_upsert(self, record: dict[str, Any]) -> bool:
+        now = datetime.now(tz=UTC).isoformat()
+        event_payload = record.get("event_payload") or {}
+        if not isinstance(event_payload, str):
+            event_payload = json.dumps(event_payload, ensure_ascii=False, default=str)
+        values = {
+            "event_id": record["event_id"],
+            "plug_name": record["plug_name"],
+            "plug_instance_id": record["plug_instance_id"],
+            "external_id": record["external_id"],
+            "materialization_key": record["materialization_key"],
+            "materialized_context_item_id": record.get("materialized_context_item_id"),
+            "event_payload": event_payload,
+            "status": record.get("status") or "pending",
+            "retry_count": int(record.get("retry_count") or 0),
+            "last_error": record.get("last_error"),
+            "created_at": record.get("created_at") or now,
+            "updated_at": record.get("updated_at") or now,
+        }
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT INTO plug_event_outbox ("
+                "event_id, plug_name, plug_instance_id, external_id, "
+                "materialization_key, materialized_context_item_id, event_payload, "
+                "status, retry_count, last_error, created_at, updated_at) "
+                "VALUES (:event_id, :plug_name, :plug_instance_id, :external_id, "
+                ":materialization_key, :materialized_context_item_id, :event_payload, "
+                ":status, :retry_count, :last_error, :created_at, :updated_at) "
+                "ON CONFLICT(event_id) DO UPDATE SET "
+                "event_payload=excluded.event_payload, "
+                "status=excluded.status, "
+                "retry_count=excluded.retry_count, "
+                "last_error=excluded.last_error, "
+                "updated_at=excluded.updated_at "
+                "WHERE plug_event_outbox.status NOT IN ('applied', 'dead')",
+                values,
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
+
+    def plug_outbox_update_status(
+        self,
+        event_id: str,
+        *,
+        status: str,
+        materialized_context_item_id: str | None = None,
+        last_error: str | None = None,
+        increment_retry: bool = False,
+    ) -> None:
+        now = datetime.now(tz=UTC).isoformat()
+        with self._lock:
+            self._db.execute(
+                "UPDATE plug_event_outbox SET "
+                "status = ?, "
+                "materialized_context_item_id = COALESCE(?, materialized_context_item_id), "
+                "last_error = ?, "
+                "retry_count = retry_count + ?, "
+                "updated_at = ? "
+                "WHERE event_id = ?",
+                (
+                    status,
+                    materialized_context_item_id,
+                    last_error,
+                    1 if increment_retry else 0,
+                    now,
+                    event_id,
+                ),
+            )
+            self._db.commit()
+
+    def plug_outbox_requeue_dead(self, event_id: str) -> bool:
+        now = datetime.now(tz=UTC).isoformat()
+        with self._lock:
+            cursor = self._db.execute(
+                "UPDATE plug_event_outbox SET "
+                "status = 'pending', "
+                "retry_count = 0, "
+                "last_error = NULL, "
+                "updated_at = ? "
+                "WHERE event_id = ? AND status = 'dead'",
+                (now, event_id),
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
+
+    def plug_outbox_list_retryable(
+        self, *, limit: int = 100, max_retry: int = 3
+    ) -> list[dict[str, Any]]:
+        with self._lock:
+            self._db.row_factory = sqlite3.Row
+            rows = self._db.execute(
+                "SELECT * FROM plug_event_outbox "
+                "WHERE status IN ('pending', 'failed') AND retry_count < ? "
+                "ORDER BY updated_at ASC LIMIT ?",
+                (max_retry, limit),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["event_payload"] = json.loads(item.get("event_payload") or "{}")
+            except json.JSONDecodeError:
+                item["event_payload"] = {}
+            result.append(item)
+        return result
 
 
 __all__ = ["SQLiteBackend"]

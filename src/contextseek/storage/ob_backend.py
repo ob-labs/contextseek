@@ -186,6 +186,7 @@ class OceanBaseBackend(SyncCapableMixin, BackendProtocol):
         self._create_table()
         self._validate_dims()
         self.ensure_sync_table()
+        self.ensure_plug_tables()
 
     def _create_client(self) -> None:
         self._obvector = ObVecClient(
@@ -1101,6 +1102,296 @@ class OceanBaseBackend(SyncCapableMixin, BackendProtocol):
         except Exception as exc:
             logger.warning(f"visible_count_for_scope failed: {exc}")
             return 0
+
+    # ------------------------------------------------------------------
+    # PlugGateway bookkeeping tables
+    # ------------------------------------------------------------------
+
+    def ensure_plug_tables(self) -> None:
+        assert self._obvector is not None
+        ddl_stmts = [
+            "CREATE TABLE IF NOT EXISTS plug_source_records "
+            "(plug_name VARCHAR(128) NOT NULL, "
+            "plug_instance_id VARCHAR(256) NOT NULL, "
+            "external_id VARCHAR(512) NOT NULL, "
+            "current_context_item_id VARCHAR(128), "
+            "content_version_hash VARCHAR(128), "
+            "write_projection_hash VARCHAR(128), "
+            "last_materialization_key VARCHAR(128), "
+            "last_materialized_context_item_id VARCHAR(128), "
+            "status VARCHAR(32) NOT NULL, "
+            "last_operation VARCHAR(32), "
+            "last_seen_at VARCHAR(64), "
+            "last_event_id VARCHAR(128), "
+            "raw_payload_digest VARCHAR(128), "
+            "PRIMARY KEY (plug_name, plug_instance_id, external_id))",
+            "CREATE TABLE IF NOT EXISTS plug_event_outbox "
+            "(event_id VARCHAR(128) NOT NULL, "
+            "plug_name VARCHAR(128) NOT NULL, "
+            "plug_instance_id VARCHAR(256) NOT NULL, "
+            "external_id VARCHAR(512) NOT NULL, "
+            "materialization_key VARCHAR(128) NOT NULL, "
+            "materialized_context_item_id VARCHAR(128), "
+            "event_payload LONGTEXT NOT NULL, "
+            "status VARCHAR(32) NOT NULL, "
+            "retry_count INT NOT NULL, "
+            "last_error LONGTEXT, "
+            "created_at VARCHAR(64) NOT NULL, "
+            "updated_at VARCHAR(64) NOT NULL, "
+            "PRIMARY KEY (event_id))",
+        ]
+        try:
+            with self._obvector.engine.connect() as conn:
+                with conn.begin():
+                    for ddl in ddl_stmts:
+                        conn.execute(text(ddl))
+        except Exception as exc:
+            raise RuntimeError("ensure_plug_tables failed") from exc
+
+    def plug_source_get(
+        self, plug_name: str, plug_instance_id: str, external_id: str
+    ) -> dict[str, Any] | None:
+        assert self._obvector is not None
+        try:
+            with self._obvector.engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        "SELECT * FROM plug_source_records "
+                        "WHERE plug_name = :plug_name "
+                        "AND plug_instance_id = :plug_instance_id "
+                        "AND external_id = :external_id"
+                    ),
+                    {
+                        "plug_name": plug_name,
+                        "plug_instance_id": plug_instance_id,
+                        "external_id": external_id,
+                    },
+                ).fetchone()
+        except Exception as exc:
+            raise RuntimeError("plug_source_get failed") from exc
+        return dict(row._mapping) if row is not None else None
+
+    def plug_source_upsert(self, record: dict[str, Any]) -> None:
+        assert self._obvector is not None
+        now = datetime.now(tz=UTC).isoformat()
+        params = {
+            "plug_name": record["plug_name"],
+            "plug_instance_id": record["plug_instance_id"],
+            "external_id": record["external_id"],
+            "current_context_item_id": record.get("current_context_item_id"),
+            "content_version_hash": record.get("content_version_hash"),
+            "write_projection_hash": record.get("write_projection_hash"),
+            "last_materialization_key": record.get("last_materialization_key"),
+            "last_materialized_context_item_id": record.get(
+                "last_materialized_context_item_id"
+            ),
+            "status": record.get("status") or "active",
+            "last_operation": record.get("last_operation"),
+            "last_seen_at": record.get("last_seen_at") or now,
+            "last_event_id": record.get("last_event_id"),
+            "raw_payload_digest": record.get("raw_payload_digest"),
+        }
+        try:
+            with self._obvector.engine.connect() as conn:
+                with conn.begin():
+                    conn.execute(
+                        text(
+                            "REPLACE INTO plug_source_records "
+                            "(plug_name, plug_instance_id, external_id, "
+                            "current_context_item_id, content_version_hash, "
+                            "write_projection_hash, last_materialization_key, "
+                            "last_materialized_context_item_id, status, "
+                            "last_operation, last_seen_at, last_event_id, "
+                            "raw_payload_digest) "
+                            "VALUES (:plug_name, :plug_instance_id, :external_id, "
+                            ":current_context_item_id, :content_version_hash, "
+                            ":write_projection_hash, :last_materialization_key, "
+                            ":last_materialized_context_item_id, :status, "
+                            ":last_operation, :last_seen_at, :last_event_id, "
+                            ":raw_payload_digest)"
+                        ),
+                        params,
+                    )
+        except Exception as exc:
+            raise RuntimeError("plug_source_upsert failed") from exc
+
+    def plug_outbox_get(self, event_id: str) -> dict[str, Any] | None:
+        assert self._obvector is not None
+        try:
+            with self._obvector.engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT * FROM plug_event_outbox WHERE event_id = :event_id"),
+                    {"event_id": event_id},
+                ).fetchone()
+        except Exception as exc:
+            raise RuntimeError("plug_outbox_get failed") from exc
+        if row is None:
+            return None
+        result = dict(row._mapping)
+        try:
+            result["event_payload"] = json.loads(result.get("event_payload") or "{}")
+        except json.JSONDecodeError:
+            result["event_payload"] = {}
+        result["retry_count"] = int(result.get("retry_count") or 0)
+        return result
+
+    def plug_outbox_upsert(self, record: dict[str, Any]) -> bool:
+        assert self._obvector is not None
+        existing = self.plug_outbox_get(record["event_id"])
+        now = datetime.now(tz=UTC).isoformat()
+        event_payload = record.get("event_payload") or {}
+        if not isinstance(event_payload, str):
+            event_payload = json.dumps(event_payload, ensure_ascii=False, default=str)
+        if existing is not None:
+            if existing.get("status") in {"applied", "dead"}:
+                return False
+            try:
+                with self._obvector.engine.connect() as conn:
+                    with conn.begin():
+                        result = conn.execute(
+                            text(
+                                "UPDATE plug_event_outbox SET "
+                                "event_payload = :event_payload, "
+                                "status = :status, "
+                                "retry_count = :retry_count, "
+                                "last_error = :last_error, "
+                                "updated_at = :updated_at "
+                                "WHERE event_id = :event_id "
+                                "AND status NOT IN ('applied', 'dead')"
+                            ),
+                            {
+                                "event_payload": event_payload,
+                                "status": record.get("status") or "pending",
+                                "retry_count": int(record.get("retry_count") or 0),
+                                "last_error": record.get("last_error"),
+                                "updated_at": record.get("updated_at") or now,
+                                "event_id": record["event_id"],
+                            },
+                        )
+            except Exception as exc:
+                raise RuntimeError("plug_outbox_upsert failed") from exc
+            return result.rowcount > 0
+        params = {
+            "event_id": record["event_id"],
+            "plug_name": record["plug_name"],
+            "plug_instance_id": record["plug_instance_id"],
+            "external_id": record["external_id"],
+            "materialization_key": record["materialization_key"],
+            "materialized_context_item_id": record.get("materialized_context_item_id"),
+            "event_payload": event_payload,
+            "status": record.get("status") or "pending",
+            "retry_count": int(record.get("retry_count") or 0),
+            "last_error": record.get("last_error"),
+            "created_at": record.get("created_at") or now,
+            "updated_at": record.get("updated_at") or now,
+        }
+        try:
+            with self._obvector.engine.connect() as conn:
+                with conn.begin():
+                    result = conn.execute(
+                        text(
+                            "INSERT INTO plug_event_outbox "
+                            "(event_id, plug_name, plug_instance_id, external_id, "
+                            "materialization_key, materialized_context_item_id, "
+                            "event_payload, status, retry_count, last_error, "
+                            "created_at, updated_at) "
+                            "VALUES (:event_id, :plug_name, :plug_instance_id, "
+                            ":external_id, :materialization_key, "
+                            ":materialized_context_item_id, :event_payload, "
+                            ":status, :retry_count, :last_error, :created_at, "
+                            ":updated_at)"
+                        ),
+                        params,
+                    )
+        except Exception as exc:
+            raise RuntimeError("plug_outbox_upsert failed") from exc
+        return result.rowcount > 0
+
+    def plug_outbox_update_status(
+        self,
+        event_id: str,
+        *,
+        status: str,
+        materialized_context_item_id: str | None = None,
+        last_error: str | None = None,
+        increment_retry: bool = False,
+    ) -> None:
+        assert self._obvector is not None
+        now = datetime.now(tz=UTC).isoformat()
+        retry_expr = "retry_count + 1" if increment_retry else "retry_count"
+        item_expr = (
+            ":materialized_context_item_id"
+            if materialized_context_item_id is not None
+            else "materialized_context_item_id"
+        )
+        try:
+            with self._obvector.engine.connect() as conn:
+                with conn.begin():
+                    conn.execute(
+                        text(
+                            "UPDATE plug_event_outbox SET "
+                            "status = :status, "
+                            f"materialized_context_item_id = {item_expr}, "
+                            "last_error = :last_error, "
+                            f"retry_count = {retry_expr}, "
+                            "updated_at = :updated_at "
+                            "WHERE event_id = :event_id"
+                        ),
+                        {
+                            "status": status,
+                            "materialized_context_item_id": materialized_context_item_id,
+                            "last_error": last_error,
+                            "updated_at": now,
+                            "event_id": event_id,
+                        },
+                    )
+        except Exception as exc:
+            raise RuntimeError("plug_outbox_update_status failed") from exc
+
+    def plug_outbox_requeue_dead(self, event_id: str) -> bool:
+        assert self._obvector is not None
+        now = datetime.now(tz=UTC).isoformat()
+        try:
+            with self._obvector.engine.connect() as conn:
+                with conn.begin():
+                    result = conn.execute(
+                        text(
+                            "UPDATE plug_event_outbox SET "
+                            "status = 'pending', "
+                            "retry_count = 0, "
+                            "last_error = NULL, "
+                            "updated_at = :updated_at "
+                            "WHERE event_id = :event_id AND status = 'dead'"
+                        ),
+                        {"updated_at": now, "event_id": event_id},
+                    )
+            return result.rowcount > 0
+        except Exception as exc:
+            raise RuntimeError("plug_outbox_requeue_dead failed") from exc
+
+    def plug_outbox_list_retryable(
+        self, *, limit: int = 100, max_retry: int = 3
+    ) -> list[dict[str, Any]]:
+        assert self._obvector is not None
+        try:
+            with self._obvector.engine.connect() as conn:
+                rows = conn.execute(
+                    text(
+                        "SELECT event_id FROM plug_event_outbox "
+                        "WHERE status IN ('pending', 'failed') "
+                        "AND retry_count < :max_retry "
+                        "ORDER BY updated_at ASC LIMIT :limit"
+                    ),
+                    {"max_retry": int(max_retry), "limit": int(limit)},
+                ).fetchall()
+        except Exception as exc:
+            raise RuntimeError("plug_outbox_list_retryable failed") from exc
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = self.plug_outbox_get(str(row[0]))
+            if item is not None:
+                result.append(item)
+        return result
 
     def close(self) -> None:
         """Dispose the underlying SQLAlchemy engine connection pool.
