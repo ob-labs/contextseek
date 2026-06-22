@@ -195,9 +195,7 @@ def _is_write_request(plug, request: PlugProxyRequest) -> bool:
         return bool(is_write(request))
     method = request.method.upper()
     path = request.path.rstrip("/")
-    return method in {"POST", "PUT", "PATCH", "DELETE"} and not path.endswith(
-        "/search"
-    )
+    return method in {"POST", "PUT", "PATCH", "DELETE"} and not path.endswith("/search")
 
 
 def _max_retry_for_instance(plug_name: str, instance_id: str) -> int:

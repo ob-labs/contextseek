@@ -101,9 +101,7 @@ class PlugGateway:
                 status="applied",
             )
         if existing_outbox and existing_outbox.get("status") == "dead":
-            msg = (
-                f"plug event is dead and requires explicit replay: {event.event_id}"
-            )
+            msg = f"plug event is dead and requires explicit replay: {event.event_id}"
             raise ValueError(msg)
 
         event_payload = event.to_payload()

@@ -110,8 +110,7 @@ def ensure_managed_powermem_env(
     ]
     if additions:
         actions.append(
-            "fill PowerMem env from ContextSeek env: "
-            + ", ".join(sorted(additions)),
+            "fill PowerMem env from ContextSeek env: " + ", ".join(sorted(additions)),
         )
 
     merged = {**defaults, **existing}
@@ -175,10 +174,13 @@ def manual_field_warnings(values: dict[str, str]) -> list[str]:
         and not values.get("EMBEDDING_DIMS", "").strip()
     ):
         warnings.append("PowerMem EMBEDDING_DIMS cannot be inferred")
-    if _provider_needs_api_key(embedding_provider) and not values.get(
-        "EMBEDDING_API_KEY",
-        "",
-    ).strip():
+    if (
+        _provider_needs_api_key(embedding_provider)
+        and not values.get(
+            "EMBEDDING_API_KEY",
+            "",
+        ).strip()
+    ):
         warnings.append("PowerMem EMBEDDING_API_KEY cannot be inferred")
 
     llm_provider = values.get("LLM_PROVIDER", "").strip()
@@ -186,7 +188,10 @@ def manual_field_warnings(values: dict[str, str]) -> list[str]:
         warnings.append("PowerMem LLM_PROVIDER cannot be inferred")
     if llm_provider and not values.get("LLM_MODEL", "").strip():
         warnings.append("PowerMem LLM_MODEL cannot be inferred")
-    if _provider_needs_api_key(llm_provider) and not values.get("LLM_API_KEY", "").strip():
+    if (
+        _provider_needs_api_key(llm_provider)
+        and not values.get("LLM_API_KEY", "").strip()
+    ):
         warnings.append("PowerMem LLM_API_KEY cannot be inferred")
 
     if values.get("DATABASE_PROVIDER") == "oceanbase":
@@ -217,11 +222,16 @@ def _contextseek_raw_env() -> dict[str, str]:
     if config:
         values.update(read_env_file(Path(config).expanduser()))
     else:
-        for candidate in (Path.cwd() / ".env", Path.home() / ".contextseek" / "config.env"):
+        for candidate in (
+            Path.cwd() / ".env",
+            Path.home() / ".contextseek" / "config.env",
+        ):
             if candidate.is_file():
                 values.update(read_env_file(candidate))
                 break
-    values.update({key: value for key, value in os.environ.items() if value is not None})
+    values.update(
+        {key: value for key, value in os.environ.items() if value is not None}
+    )
     return values
 
 
@@ -248,14 +258,18 @@ def _fill_storage(values: dict[str, str], raw: dict[str, str]) -> None:
             "OB_TABLE_NAME",
             raw.get("OCEANBASE_COLLECTION", "memories"),
         )
-        _copy_if_present(values, raw, "EMBEDDING_DIMS", "OCEANBASE_EMBEDDING_MODEL_DIMS")
+        _copy_if_present(
+            values, raw, "EMBEDDING_DIMS", "OCEANBASE_EMBEDDING_MODEL_DIMS"
+        )
 
 
 def _fill_embedding(values: dict[str, str], raw: dict[str, str]) -> None:
     configured_provider = raw.get("EMBEDDING_PROVIDER", "").strip().lower()
     if configured_provider == "none":
         values["EMBEDDING_PROVIDER"] = "mock"
-        values["EMBEDDING_DIMS"] = raw.get("EMBEDDING_DIMS", _DEFAULT_LOCAL_EMBEDDING_DIMS)
+        values["EMBEDDING_DIMS"] = raw.get(
+            "EMBEDDING_DIMS", _DEFAULT_LOCAL_EMBEDDING_DIMS
+        )
         return
     provider = _resolve_provider(
         raw,

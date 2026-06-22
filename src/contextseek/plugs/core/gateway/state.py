@@ -31,8 +31,7 @@ def resolve_plug_state_store(adapter: Any) -> SyncCapableMixin:
 
     if not isinstance(backend, SyncCapableMixin):
         msg = (
-            "PlugGateway requires a sync-capable backend "
-            "(sqlite, seekdb, or oceanbase)"
+            "PlugGateway requires a sync-capable backend (sqlite, seekdb, or oceanbase)"
         )
         raise PlugStateStoreUnavailable(msg)
 

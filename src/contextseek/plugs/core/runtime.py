@@ -59,11 +59,15 @@ class PythonPackageRuntimeInstaller:
         dry_run: bool = False,
         check: bool = False,
     ) -> LinkerResult:
-        if self.install_env_var and _disabled(os.environ.get(self.install_env_var, "1")):
+        if self.install_env_var and _disabled(
+            os.environ.get(self.install_env_var, "1")
+        ):
             return LinkerResult(
                 changed=False,
                 dry_run=dry_run or check,
-                actions=[f"skip {self.label} package install: {self.install_env_var}=0"],
+                actions=[
+                    f"skip {self.label} package install: {self.install_env_var}=0"
+                ],
             )
 
         strategy = self.install_strategy()
@@ -242,9 +246,7 @@ class PythonPackageRuntimeInstaller:
         )
         result = _run([str(python), "-c", script, self.package_name], timeout=30.0)
         installed = (
-            result.output.strip().splitlines()[-1]
-            if result.returncode == 0
-            else None
+            result.output.strip().splitlines()[-1] if result.returncode == 0 else None
         )
         return PythonPackageVersionInfo(
             package_name=self.package_name,

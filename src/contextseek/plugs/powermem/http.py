@@ -159,7 +159,9 @@ def base_url_for_instance(instance_id: str) -> str:
 
 def default_scope(body: Any, instance_id: str) -> str | None:
     if isinstance(body, dict):
-        metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        metadata = (
+            body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        )
         if metadata.get("scope"):
             return str(metadata["scope"])
         if body.get("scope"):

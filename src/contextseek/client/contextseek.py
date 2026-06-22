@@ -2296,9 +2296,7 @@ class ContextSeek:
 
         if result.has_duplicates:
             dup = next(
-                c
-                for c in result.conflicts
-                if c.conflict_type == ConflictType.duplicate
+                c for c in result.conflicts if c.conflict_type == ConflictType.duplicate
             )
             dup_ref = self.resolver.ref_for(item.scope, dup.existing_item_id)
             dup_item = self._read_item(dup_ref)
@@ -2307,13 +2305,11 @@ class ContextSeek:
 
         if result.has_conflicts:
             if any(
-                c.conflict_type == ConflictType.contradiction
-                for c in result.conflicts
+                c.conflict_type == ConflictType.contradiction for c in result.conflicts
             ):
                 item.tags.append("has_contradiction")
             if any(
-                c.conflict_type == ConflictType.near_duplicate
-                for c in result.conflicts
+                c.conflict_type == ConflictType.near_duplicate for c in result.conflicts
             ):
                 item.tags.append("near_duplicate")
             for c in result.conflicts:

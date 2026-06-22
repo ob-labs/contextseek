@@ -341,13 +341,7 @@ def test_powermem_mcp_proxy_forwards_then_materializes_add(tmp_path) -> None:
 
     ctx, _backend = _contextseek(tmp_path)
     mcp_client = _FakeMCPClient(
-        [
-            {
-                "results": [
-                    {"id": "mcp-1", "memory": "mcp memory", "event": "ADD"}
-                ]
-            }
-        ]
+        [{"results": [{"id": "mcp-1", "memory": "mcp memory", "event": "ADD"}]}]
     )
     proxy = PlugMCPProxy(
         client=ctx,
@@ -750,8 +744,7 @@ def test_proxy_install_openclaw_installs_missing_powermem_package(
     assert result.changed is True
     assert "powermem>=1.1.1" in log.read_text(encoding="utf-8")
     assert any(
-        "install Python package: powermem>=1.1.1" in action
-        for action in result.actions
+        "install Python package: powermem>=1.1.1" in action for action in result.actions
     )
 
 
@@ -889,14 +882,15 @@ def test_proxy_install_claude_code_mcp_prepares_managed_runtime(
         "would install Python package: powermem>=1.1.1" in action
         for action in result.actions
     )
-    assert not any("would install Python package: powermem-mcp" in action for action in result.actions)
-    assert any(
-        "would install Python package: socksio" in action
+    assert not any(
+        "would install Python package: powermem-mcp" in action
         for action in result.actions
     )
     assert any(
-        f"write Claude Code MCP config: {config}" in action
-        for action in result.actions
+        "would install Python package: socksio" in action for action in result.actions
+    )
+    assert any(
+        f"write Claude Code MCP config: {config}" in action for action in result.actions
     )
 
 
@@ -919,8 +913,7 @@ def test_proxy_install_claude_code_mcp_prepares_explicit_mcp_backend(
         for action in result.actions
     )
     assert any(
-        "would install Python package: socksio" in action
-        for action in result.actions
+        "would install Python package: socksio" in action for action in result.actions
     )
 
 
@@ -939,8 +932,7 @@ def test_proxy_install_claude_code_mcp_installs_optional_ollama_provider(
     result = plug.install(linker="claude-code", dry_run=True)
 
     assert any(
-        "would install Python package: ollama" in action
-        for action in result.actions
+        "would install Python package: ollama" in action for action in result.actions
     )
 
 
@@ -1076,7 +1068,9 @@ def test_proxy_install_claude_code_installs_missing_powermem_package(
         "install Python package: powermem[server]>=1.1.1" in action
         for action in result.actions
     )
-    assert any("verified PowerMem Python package" in action for action in result.actions)
+    assert any(
+        "verified PowerMem Python package" in action for action in result.actions
+    )
 
 
 def test_proxy_install_claude_code_installs_missing_plugin(

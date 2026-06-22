@@ -5,16 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
-import httpx
 import pytest
-from fastapi import FastAPI
 from seekvfs import VFS
 
 from contextseek.client.contextseek import ContextSeek
 from contextseek.domain.serialization import deserialize_context_item
 from contextseek.plugs.core.gateway import OutboxWorker, PlugGateway
-from contextseek.plugs.core.proxy.http import create_plug_proxy_router
 from contextseek.plugs.core.proxy.materialization import contextseek_meta
 from contextseek.plugs.core.protocols import (
     PlugChangeEvent,
@@ -26,8 +24,10 @@ from contextseek.storage.storage_adapter import SeekVFSStorageAdapter
 from contextseek.storage.tiered_adapter import TieredSeekVFSAdapter
 
 
-def _asgi_post(app: FastAPI, path: str, **kwargs) -> httpx.Response:
-    async def _request() -> httpx.Response:
+def _asgi_post(app: Any, path: str, **kwargs: Any) -> Any:
+    httpx = pytest.importorskip("httpx", reason="http extra not installed")
+
+    async def _request() -> Any:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
             transport=transport,
@@ -36,6 +36,15 @@ def _asgi_post(app: FastAPI, path: str, **kwargs) -> httpx.Response:
             return await client.post(path, **kwargs)
 
     return asyncio.run(_request())
+
+
+def _proxy_app(ctx: ContextSeek) -> Any:
+    fastapi = pytest.importorskip("fastapi", reason="http extra not installed")
+    from contextseek.plugs.core.proxy.http import create_plug_proxy_router
+
+    app = fastapi.FastAPI()
+    app.include_router(create_plug_proxy_router(ctx))
+    return app
 
 
 def _contextseek(tmp_path: Path) -> tuple[ContextSeek, SQLiteBackend]:
@@ -124,9 +133,7 @@ def test_delete_soft_deletes_current_item(tmp_path: Path) -> None:
     gateway = PlugGateway(ctx)
 
     created = gateway.apply(_event("m1", "to delete", event_id="evt-add"))
-    deleted = gateway.apply(
-        _event("m1", "", operation="delete", event_id="evt-delete")
-    )
+    deleted = gateway.apply(_event("m1", "", operation="delete", event_id="evt-delete"))
 
     assert deleted.context_item_id == created.context_item_id
     record = backend.plug_source_get("testplug", "default", "m1")
@@ -176,9 +183,10 @@ def test_tiered_adapter_resolves_hot_plug_state(tmp_path: Path) -> None:
 
     receipt = PlugGateway(ctx).apply(_event("m1", "tiered memory"))
 
-    assert hot.plug_source_get("testplug", "default", "m1")[
-        "current_context_item_id"
-    ] == receipt.context_item_id
+    assert (
+        hot.plug_source_get("testplug", "default", "m1")["current_context_item_id"]
+        == receipt.context_item_id
+    )
     cold.close()
     hot.close()
 
@@ -640,8 +648,7 @@ def test_powermem_proxy_marks_partial_failed_with_207(
         lambda _plug_name, _instance_id, _body, registry=None: FakePlug(),
     )
     monkeypatch.setattr(PlugGateway, "apply", fail_one)
-    app = FastAPI()
-    app.include_router(create_plug_proxy_router(ctx))
+    app = _proxy_app(ctx)
 
     response = _asgi_post(
         app,
@@ -684,8 +691,7 @@ def test_powermem_proxy_marks_all_failed_with_502(
         lambda _plug_name, _instance_id, _body, registry=None: FakePlug(),
     )
     monkeypatch.setattr(PlugGateway, "apply", fail_apply)
-    app = FastAPI()
-    app.include_router(create_plug_proxy_router(ctx))
+    app = _proxy_app(ctx)
 
     response = _asgi_post(
         app,
@@ -711,8 +717,7 @@ def test_powermem_proxy_returns_503_when_plug_is_not_configured(
         "contextseek.plugs.core.proxy.http._build_plug",
         fail_build,
     )
-    app = FastAPI()
-    app.include_router(create_plug_proxy_router(ctx))
+    app = _proxy_app(ctx)
 
     response = _asgi_post(
         app,
@@ -745,8 +750,7 @@ def test_powermem_proxy_preserves_non_dict_response_body(
         "contextseek.plugs.core.proxy.http._build_plug",
         lambda _plug_name, _instance_id, _body, registry=None: FakePlug(),
     )
-    app = FastAPI()
-    app.include_router(create_plug_proxy_router(ctx))
+    app = _proxy_app(ctx)
 
     response = _asgi_post(
         app,

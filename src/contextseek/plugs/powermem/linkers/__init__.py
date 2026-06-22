@@ -12,8 +12,12 @@ from contextseek.plugs.powermem.linkers.claude_code import (
 from contextseek.plugs.powermem.linkers.claude_desktop import (
     create_linker as create_claude_desktop_linker,
 )
-from contextseek.plugs.powermem.linkers.cline import create_linker as create_cline_linker
-from contextseek.plugs.powermem.linkers.codex import create_linker as create_codex_linker
+from contextseek.plugs.powermem.linkers.cline import (
+    create_linker as create_cline_linker,
+)
+from contextseek.plugs.powermem.linkers.codex import (
+    create_linker as create_codex_linker,
+)
 from contextseek.plugs.powermem.linkers.copilot import (
     create_linker as create_copilot_linker,
 )
@@ -26,7 +30,9 @@ from contextseek.plugs.powermem.linkers.openclaw import (
 from contextseek.plugs.powermem.linkers.opencode import (
     create_linker as create_opencode_linker,
 )
-from contextseek.plugs.powermem.linkers.qoder import create_linker as create_qoder_linker
+from contextseek.plugs.powermem.linkers.qoder import (
+    create_linker as create_qoder_linker,
+)
 from contextseek.plugs.powermem.linkers.vscode import (
     create_linker as create_vscode_linker,
 )
@@ -67,9 +73,7 @@ _LINKER_FACTORIES = {
 
 
 def available_linker_names() -> list[str]:
-    return sorted(
-        name for name in _LINKER_FACTORIES if not is_linker_disabled(name)
-    )
+    return sorted(name for name in _LINKER_FACTORIES if not is_linker_disabled(name))
 
 
 def get_linker(name: str) -> Linker:
@@ -93,9 +97,7 @@ def is_linker_disabled(name: str) -> bool:
     if key not in _CLAUDE_CODE_HTTP_LINKERS:
         return False
     enabled = os.environ.get(_CLAUDE_CODE_HTTP_ENABLED_ENV, "").strip().lower()
-    legacy_enabled = (
-        os.environ.get(_LEGACY_CLAUDE_CODE_ENABLED_ENV, "").strip().lower()
-    )
+    legacy_enabled = os.environ.get(_LEGACY_CLAUDE_CODE_ENABLED_ENV, "").strip().lower()
     return enabled not in _TRUE_VALUES and legacy_enabled not in _TRUE_VALUES
 
 

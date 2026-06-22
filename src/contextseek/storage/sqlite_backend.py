@@ -815,9 +815,7 @@ class SQLiteBackend(SyncCapableMixin, BackendProtocol):
             "plug_instance_id": record["plug_instance_id"],
             "external_id": record["external_id"],
             "materialization_key": record["materialization_key"],
-            "materialized_context_item_id": record.get(
-                "materialized_context_item_id"
-            ),
+            "materialized_context_item_id": record.get("materialized_context_item_id"),
             "event_payload": event_payload,
             "status": record.get("status") or "pending",
             "retry_count": int(record.get("retry_count") or 0),

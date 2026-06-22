@@ -38,7 +38,9 @@ class OutboxWorker:
             try:
                 event = PlugChangeEvent.from_payload(row["event_payload"])
             except Exception:
-                logger.exception("Plug outbox payload is invalid for event %s", event_id)
+                logger.exception(
+                    "Plug outbox payload is invalid for event %s", event_id
+                )
                 if event_id:
                     result.failed_event_ids.append(event_id)
                     self._mark_invalid_payload(event_id)

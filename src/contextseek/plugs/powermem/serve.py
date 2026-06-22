@@ -157,7 +157,9 @@ def run_powermem_serve(args: Any) -> int:
                 flush=True,
             )
             return int(process.returncode or 1)
-        return _run_contextseek_http(plan, log_level=str(getattr(args, "log_level", "info")))
+        return _run_contextseek_http(
+            plan, log_level=str(getattr(args, "log_level", "info"))
+        )
     finally:
         _terminate_process(process)
 
@@ -169,7 +171,9 @@ def _powermem_server_command(
     port: int,
 ) -> list[str]:
     raw = configured or os.environ.get("CONTEXTSEEK_POWERMEM_SERVER_COMMAND")
-    command = shlex.split(raw) if raw else PowerMemHTTPRuntimeInstaller().server_command()
+    command = (
+        shlex.split(raw) if raw else PowerMemHTTPRuntimeInstaller().server_command()
+    )
     if not command:
         command = PowerMemHTTPRuntimeInstaller().server_command()
     return [*command, "--host", host, "--port", str(port)]

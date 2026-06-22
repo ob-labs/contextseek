@@ -331,7 +331,9 @@ class PowerMemAdapter:
         return float(value) if value is not None else 1.0
 
     def _scope_from_request(self, body: dict[str, Any]) -> str:
-        metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        metadata = (
+            body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        )
         if metadata.get("scope"):
             return str(metadata["scope"])
         if body.get("scope"):
@@ -348,7 +350,9 @@ class PowerMemAdapter:
 
     @staticmethod
     def _stage_hint_from_request(body: dict[str, Any]) -> str:
-        metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        metadata = (
+            body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        )
         explicit_stage = body.get("stage_hint") or metadata.get("stage_hint")
         if explicit_stage:
             return str(explicit_stage)

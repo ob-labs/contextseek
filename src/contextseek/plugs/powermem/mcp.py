@@ -31,7 +31,7 @@ _WRITE_TOOLS = {"add_memory", "update_memory", "delete_memory"}
 _SEARCH_TOOLS = {"search_memories"}
 _SUPPORTED_TOOLS = _WRITE_TOOLS | _SEARCH_TOOLS
 _SDK_RESULT_PREFIX = "__CONTEXTSEEK_POWERMEM_SDK_RESULT__"
-_SDK_TOOL_RUNNER = r'''
+_SDK_TOOL_RUNNER = r"""
 import json
 import sys
 
@@ -129,7 +129,7 @@ except Exception as exc:
         },
         exit_code=1,
     )
-'''
+"""
 
 
 def _default_powermem_mcp_command() -> list[str]:
@@ -156,9 +156,7 @@ class PowerMemMCPClient(Protocol):
 class PowerMemMCPStdioClient:
     """Small line-delimited JSON-RPC client for ``powermem-mcp stdio``."""
 
-    command: list[str] = field(
-        default_factory=_default_powermem_mcp_command
-    )
+    command: list[str] = field(default_factory=_default_powermem_mcp_command)
     timeout: float = 30.0
     env: dict[str, str] | None = None
     _process: subprocess.Popen[str] | None = field(default=None, init=False, repr=False)
@@ -570,9 +568,7 @@ def _event_body_for_tool(tool_name: str, body: dict[str, Any]) -> dict[str, Any]
 
 def _without_contextseek_fields(body: dict[str, Any]) -> dict[str, Any]:
     return {
-        key: value
-        for key, value in body.items()
-        if key not in {"scope", "stage_hint"}
+        key: value for key, value in body.items() if key not in {"scope", "stage_hint"}
     }
 
 

@@ -2,18 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 pytest.importorskip("fastapi", reason="http extra not installed")
-from fastapi.testclient import TestClient
 
 from contextseek.domain.context_item import ContextItem
 from contextseek.domain.provenance import Provenance, SourceType
 from contextseek.domain.results import ResponseMeta, RetrieveResponse, SearchHit
 from contextseek.http.server import create_app
+
+
+def _asgi_post(app, path: str, **kwargs) -> httpx.Response:
+    async def _request() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await client.post(path, **kwargs)
+
+    return asyncio.run(_request())
 
 
 def _sample_hit() -> SearchHit:
@@ -46,9 +59,9 @@ def test_http_retrieve_forwards_include_expired_and_returns_meta() -> None:
         meta=ResponseMeta(layer="summary", full_via="expand", hint="use expand"),
     )
     app = create_app(client=ctx)
-    client = TestClient(app)
 
-    res = client.post(
+    res = _asgi_post(
+        app,
         "/retrieve",
         json={
             "scope": "tenant/project/session",
@@ -89,9 +102,9 @@ def test_http_compact_returns_conflict_counts() -> None:
         conflict_drift_count=5,
     )
     app = create_app(client=ctx)
-    client = TestClient(app)
 
-    res = client.post(
+    res = _asgi_post(
+        app,
         "/compact",
         json={
             "scope": "tenant/project/session",

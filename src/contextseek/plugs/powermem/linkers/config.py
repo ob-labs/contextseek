@@ -414,9 +414,8 @@ class PowerMemClaudeCodeHTTPConfigLinker(LifecycleLinker):
         env.setdefault("POWERMEM_AGENT_ID", "claude-code")
         settings_after["env"] = env
 
-        settings_changed = (
-            settings_after != settings_before
-            and len(warnings) == len(env_result.warnings)
+        settings_changed = settings_after != settings_before and len(warnings) == len(
+            env_result.warnings
         )
         mcp_path = _path_from_env(self.mcp_config_env_var, self.mcp_default_config_path)
         mcp_changed = False
@@ -451,7 +450,9 @@ class PowerMemClaudeCodeHTTPConfigLinker(LifecycleLinker):
                 warnings=warnings,
             )
         if settings_changed:
-            _write_jsonc_top_level_entry(path, settings_before_text, key="env", value=env)
+            _write_jsonc_top_level_entry(
+                path, settings_before_text, key="env", value=env
+            )
         if mcp_changed:
             _write_jsonc_top_level_entry(
                 mcp_path,
@@ -1053,7 +1054,9 @@ def _upsert_jsonc_top_level_entry(
     member = _find_jsonc_object_member(text, root[0], root[1], key)
     if member is not None:
         replacement = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
-        replacement = _indent_multiline(replacement, _column_at(text, member.value_start))
+        replacement = _indent_multiline(
+            replacement, _column_at(text, member.value_start)
+        )
         return text[: member.value_start] + replacement + text[member.value_end :]
     return _insert_jsonc_object_member(text, root[0], root[1], key, value)
 
@@ -1139,7 +1142,7 @@ def _insert_jsonc_object_member(
     inner_indent = closing_indent + "  "
     value_text = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
     value_text = _indent_multiline(value_text, len(inner_indent) + len(key) + 4)
-    entry = f'{inner_indent}{json.dumps(key, ensure_ascii=False)}: {value_text}'
+    entry = f"{inner_indent}{json.dumps(key, ensure_ascii=False)}: {value_text}"
     if not members:
         insertion = "\n" + entry + "\n" + closing_indent
         return text[: object_start + 1] + insertion + text[object_end:]
@@ -1353,7 +1356,11 @@ def _upsert_toml_section(text: str, *, header: str, section: str) -> str:
         start, end = block
         prefix = text[:start].rstrip()
         suffix = text[end:].lstrip("\n")
-        parts = [part for part in [prefix, normalized_section.rstrip(), suffix.rstrip()] if part]
+        parts = [
+            part
+            for part in [prefix, normalized_section.rstrip(), suffix.rstrip()]
+            if part
+        ]
         return "\n\n".join(parts) + "\n"
     prefix = text.rstrip()
     if not prefix:
