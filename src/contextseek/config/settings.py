@@ -292,6 +292,10 @@ class RetrievalSettings(BaseSettings):
     )
     reranker_mode: str = "heuristic"
     llm_rerank_top_n: int = 20
+    hierarchical_alpha: float = 0.5
+    hierarchical_max_rounds: int = 24
+    hierarchical_convergence_rounds: int = 3
+    hierarchical_branch: int = 8
 
 
 class EvolutionSettings(BaseSettings):
@@ -523,6 +527,10 @@ def to_strategy_config(settings: ContextSeekSettings) -> "StrategyConfig":
             link_expansion_relations=tuple(settings.retrieval.link_expansion_relations),
             reranker_mode=settings.retrieval.reranker_mode,
             llm_rerank_top_n=settings.retrieval.llm_rerank_top_n,
+            hierarchical_alpha=settings.retrieval.hierarchical_alpha,
+            hierarchical_max_rounds=settings.retrieval.hierarchical_max_rounds,
+            hierarchical_convergence_rounds=settings.retrieval.hierarchical_convergence_rounds,
+            hierarchical_branch=settings.retrieval.hierarchical_branch,
         ),
         evolution=EvolutionStrategy(
             dedupe_by_hash=settings.evolution.dedupe_by_hash,

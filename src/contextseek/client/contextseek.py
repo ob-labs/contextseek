@@ -61,7 +61,11 @@ from contextseek.llm.prompts import (
 )
 from contextseek.llm.client import invoke_json, invoke_text
 from contextseek.llm.parsers import extract_json_object
-from contextseek.routing.resolver import ScopeResolver
+from contextseek.routing.resolver import (
+    SCOPE_NODE_ITEM_ID,
+    ScopeResolver,
+    is_scope_node_ref,
+)
 
 # Lazy imports to avoid hard circular dependencies at module level.
 # These are imported inside methods that need them.
@@ -78,6 +82,43 @@ _AUDIT_CONTEXT: ContextVar[dict[str, Any]] = ContextVar(
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _scope_chain(scope: str, root_norm: str) -> set[str]:
+    """Return *scope* and all its ancestors that lie within *root_norm*.
+
+    With ``root_norm=""`` every prefix down to the top-level segment is
+    included; otherwise ancestors above the root subtree are excluded.
+    """
+    scope = scope.strip("/")
+    if not scope:
+        return set()
+    parts = scope.split("/")
+    chain: set[str] = set()
+    for i in range(len(parts), 0, -1):
+        cand = "/".join(parts[:i])
+        if root_norm and not (cand == root_norm or cand.startswith(root_norm + "/")):
+            continue
+        chain.add(cand)
+    return chain
+
+
+def _scope_lca(scopes: list[str]) -> str:
+    """Return the deepest common ancestor scope for ``scopes``.
+
+    Input scopes may be absolute-ish strings with surrounding slashes; empty
+    scopes are ignored. Returns ``""`` when no common prefix exists.
+    """
+    normalized = [s.strip("/") for s in scopes if s and s.strip("/")]
+    if not normalized:
+        return ""
+    split = [s.split("/") for s in normalized]
+    common: list[str] = []
+    for parts in zip(*split):
+        if len(set(parts)) != 1:
+            break
+        common.append(parts[0])
+    return "/".join(common)
 
 
 # ---------------------------------------------------------------------------
@@ -529,6 +570,7 @@ class ContextSeek:
         include_expired: bool = False,
         geo_query: "Any | None" = None,
         min_score: float | None = None,
+        with_trace: bool = False,
     ) -> RetrieveResponse:
         """Search stored context; defaults to L1 summaries, ``full=True`` returns L0 bodies.
 
@@ -583,17 +625,34 @@ class ContextSeek:
             embedder=self.embedder,
             reranker=reranker,
         )
-        hits = orchestrator.search(
-            prefixes=[prefix],
-            query=query,
-            k=k,
-            stage=stage_filter,
-            tags=tag_filter,
-            include_deleted=include_deleted,
-            include_expired=include_expired,
-            geo_query=geo_query,
-            min_score=min_score,
-        )
+        trace = None
+        if with_trace:
+            hits, stats = orchestrator.search(
+                prefixes=[prefix],
+                query=query,
+                k=k,
+                stage=stage_filter,
+                tags=tag_filter,
+                include_deleted=include_deleted,
+                include_expired=include_expired,
+                geo_query=geo_query,
+                min_score=min_score,
+                with_stats=True,
+                with_trace=True,
+            )
+            trace = stats.trace
+        else:
+            hits = orchestrator.search(
+                prefixes=[prefix],
+                query=query,
+                k=k,
+                stage=stage_filter,
+                tags=tag_filter,
+                include_deleted=include_deleted,
+                include_expired=include_expired,
+                geo_query=geo_query,
+                min_score=min_score,
+            )
         hits = self._filter_readable_hits(hits, scope=scope)
         if min_conf is not None:
             hits = [h for h in hits if h.item.provenance.confidence >= min_conf]
@@ -651,7 +710,7 @@ class ContextSeek:
             },
         )
 
-        return RetrieveResponse(items=hits, meta=meta)
+        return RetrieveResponse(items=hits, meta=meta, trace=trace)
 
     def expand(self, hits: list[SearchHit]) -> list[ContextItem]:
         """Upgrade a list of ``SearchHit`` rows to L0 full text.
@@ -1028,6 +1087,7 @@ class ContextSeek:
                 return
             result.append(item)
 
+        refs = [r for r in refs if not is_scope_node_ref(r)]
         if read_batch is None:
             for ref in refs:
                 _append_from_payload(ref, self.adapter.read(ref))
@@ -1357,9 +1417,11 @@ class ContextSeek:
         prefix = self.resolver.prefix_for(scope)
         refs = self.adapter.ls(prefix)
 
-        # Read all items
+        # Read all items (skip reserved scope-node summary rows)
         items: list[ContextItem] = []
         for ref in refs:
+            if is_scope_node_ref(ref):
+                continue
             payload = self.adapter.read(ref)
             if payload is None:
                 continue
@@ -1394,6 +1456,9 @@ class ContextSeek:
                     archived_ref = self.resolver.ref_for(scope, item.id)
                     self.adapter.write(archived_ref, archived_payload)
 
+            if not dry_run:
+                self._safe_refresh_scope_summaries(scope)
+
             self._emit_audit(
                 action="compact",
                 scope=scope,
@@ -1425,6 +1490,9 @@ class ContextSeek:
                 dup_ref = self.resolver.ref_for(scope, dup.id)
                 self.adapter.write(dup_ref, dup_payload)
 
+        if not dry_run:
+            self._safe_refresh_scope_summaries(scope)
+
         report = CompactReport(
             merged_count=len(duplicates),
             archived_count=0,
@@ -1439,6 +1507,13 @@ class ContextSeek:
         )
 
         return report
+
+    def _safe_refresh_scope_summaries(self, scope: str) -> None:
+        """Refresh node summaries for *scope*'s chain; never fail the caller."""
+        try:
+            self.refresh_scope_summaries(changed_scopes=[scope])
+        except Exception:  # noqa: BLE001  # summary refresh must not break compact
+            pass
 
     def items(
         self,
@@ -1497,6 +1572,163 @@ class ContextSeek:
             scope_items[scope] = [item for _, item in self._list_items(scope)]
 
         return build_scope_tree(scope_items, root)
+
+    def refresh_scope_summaries(
+        self,
+        root: str | None = None,
+        *,
+        changed_scopes: list[str] | None = None,
+    ) -> int:
+        """Generate bottom-up L0/L1 summaries for every scope (directory) node.
+
+        Each scope node's summary is stored as a reserved ``__node__``
+        :class:`ContextItem` (``searchable=False``) so it powers hierarchical
+        retrieval and directory overviews without polluting normal search. A
+        node's input is its direct items' abstracts plus its child nodes'
+        abstracts, aggregated leaf-to-root so parents see fresh child summaries.
+
+        Args:
+            root: Restrict to this scope subtree (``None`` = whole store).
+            changed_scopes: When given, only refresh these scopes and their
+                ancestors (the chain touched by a write), reading unchanged
+                sibling node abstracts from storage. This is the incremental
+                path used by :meth:`compact`.
+
+        Returns:
+            Number of scope nodes written.
+        """
+        root_norm = (root or "").strip("/")
+
+        # Incremental: only changed scopes' chains. Build candidates from one
+        # list pass rooted at the changed scopes' LCA so multi-branch updates
+        # are all covered.
+        target_chain: set[str] | None = None
+        if changed_scopes is not None:
+            changed_norm: list[str] = []
+            for s in changed_scopes:
+                s_norm = s.strip("/")
+                if not s_norm:
+                    continue
+                if root_norm and not (
+                    s_norm == root_norm or s_norm.startswith(root_norm + "/")
+                ):
+                    continue
+                changed_norm.append(s_norm)
+            if not changed_norm:
+                return 0
+            target_chain = set()
+            for s in changed_norm:
+                target_chain |= _scope_chain(s, root_norm)
+            if not target_chain:
+                return 0
+            base = _scope_lca(changed_norm)
+            if root_norm and not (
+                base == root_norm or base.startswith(root_norm + "/")
+            ):
+                base = root_norm
+            list_prefix = (
+                self.resolver.prefix_for(base) if base else self.resolver.scheme
+            )
+        else:
+            list_prefix = (
+                self.resolver.prefix_for(root) if root else self.resolver.scheme
+            )
+        refs = self.adapter.ls(list_prefix)
+
+        # Cheap pass: which scopes exist and their direct (non-node) item refs.
+        scope_item_refs: dict[str, list[str]] = {}
+        present_scopes: set[str] = set()
+        for ref in refs:
+            try:
+                node_scope, _ = self.resolver.parse_ref(ref)
+            except ValueError:
+                continue
+            present_scopes.add(node_scope)
+            if not is_scope_node_ref(ref):
+                scope_item_refs.setdefault(node_scope, []).append(ref)
+
+        tree: set[str] = set()
+        for s in present_scopes:
+            tree |= _scope_chain(s, root_norm)
+        if not tree:
+            return 0
+
+        children: dict[str, list[str]] = {}
+        for s in tree:
+            parent = s.rsplit("/", 1)[0] if "/" in s else ""
+            if s != root_norm and parent in tree:
+                children.setdefault(parent, []).append(s)
+
+        targets = tree if target_chain is None else (target_chain & tree)
+
+        # Read direct item abstracts only for the scopes we will rewrite.
+        direct_abstracts: dict[str, list[str]] = {}
+        for s in targets:
+            for ref in scope_item_refs.get(s, []):
+                item = self._read_item(ref)
+                if item is None or item.is_deleted:
+                    continue
+                text = item.abstract or (item.summary or item.content_text)
+                if text:
+                    direct_abstracts.setdefault(s, []).append(text[:300])
+
+        fresh: dict[str, str] = {}
+        written = 0
+        for s in sorted(targets, key=lambda x: x.count("/"), reverse=True):
+            child_abstracts = [
+                fresh.get(c) or self._read_node_abstract(c) for c in children.get(s, [])
+            ]
+            inputs = [t for t in direct_abstracts.get(s, []) + child_abstracts if t]
+            if not inputs:
+                continue
+            abstract, summary = self._make_node_summary(inputs)
+            fresh[s] = abstract
+            self._write_node_item(s, abstract, summary)
+            written += 1
+        return written
+
+    def _read_node_abstract(self, scope: str) -> str:
+        """Return the stored abstract of *scope*'s node item, or ''."""
+        ref = self.resolver.ref_for(scope, SCOPE_NODE_ITEM_ID)
+        payload = self.adapter.read(ref)
+        if not payload:
+            return ""
+        return str(payload.get("abstract") or "")
+
+    def _make_node_summary(self, inputs: list[str]) -> tuple[str, str]:
+        """Aggregate child/item abstracts into a node ``(abstract, summary)``.
+
+        Uses the summarizer when available; otherwise falls back to a plain
+        concatenation so node summaries still exist in LLM-free deployments.
+        """
+        joined = "\n".join(inputs)
+        if self.summarizer is not None:
+            return self.summarizer.summarize(joined)
+        summary = joined[:2000]
+        abstract = inputs[0][:120] if inputs else ""
+        return abstract, summary
+
+    def _write_node_item(self, scope: str, abstract: str, summary: str) -> None:
+        """Create or overwrite the reserved ``__node__`` item for *scope*."""
+        ref = self.resolver.ref_for(scope, SCOPE_NODE_ITEM_ID)
+        existing = self.adapter.read(ref)
+        provenance = build_provenance("scope_summary", SourceType.merge_result, 1.0)
+        item = ContextItem(
+            content=summary,
+            scope=scope,
+            provenance=provenance,
+            tags=["__scope_node__"],
+            stage=Stage.knowledge,
+            stability=Stability.stable,
+            searchable=False,
+        )
+        item.abstract = abstract
+        item.summary = summary
+        if isinstance(existing, dict) and existing.get("id"):
+            item.id = str(existing["id"])
+        if self.embedder is not None and abstract:
+            item.embedding = self.embedder(abstract)
+        self.adapter.write(ref, serialize_context_item(item))
 
     def scope_stats(self, scope: str) -> "ScopeStats":
         """Return aggregate statistics for a single scope.
@@ -2255,8 +2487,7 @@ class ContextSeek:
     ) -> ContextItem:
         """Populate summaries/embeddings and optionally run conflict detection."""
         if self.summarizer is not None:
-            item.abstract = self.summarizer.abstract(item.content_text)
-            item.summary = self.summarizer.summary(item.content_text)
+            item.abstract, item.summary = self.summarizer.summarize(item.content_text)
 
         if self.embedder is not None:
             embed_source = item.abstract or item.content_text
@@ -2494,6 +2725,8 @@ class ContextSeek:
         refs = self.adapter.ls(prefix)
         results: list[tuple[str, ContextItem]] = []
         for ref in refs:
+            if is_scope_node_ref(ref):
+                continue
             item = self._read_item(ref)
             if item is None:
                 continue

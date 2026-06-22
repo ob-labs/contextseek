@@ -32,6 +32,57 @@ class SearchHit:
     """Recall path label (observability)."""
 
 
+@dataclass
+class TraceEvent:
+    """One decision point recorded during hierarchical retrieval."""
+
+    type: str
+    """Event kind: ``node_score`` | ``descend`` | ``leaf_recall`` | ``converged``."""
+
+    scope: str = ""
+    score: float = 0.0
+    message: str = ""
+    data: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type,
+            "scope": self.scope,
+            "score": round(self.score, 6),
+            "message": self.message,
+            "data": self.data,
+        }
+
+
+@dataclass
+class RetrievalTrace:
+    """Ordered log of the directory descent taken during a retrieval.
+
+    Populated by ``HierarchicalRecallRoute`` and surfaced (opt-in) on
+    :class:`RetrieveResponse` so callers can visualise *why* a hit was found.
+    """
+
+    events: list[TraceEvent] = field(default_factory=list)
+
+    def add(
+        self,
+        type: str,  # noqa: A002 — mirrors TraceEvent.type
+        *,
+        scope: str = "",
+        score: float = 0.0,
+        message: str = "",
+        **data: object,
+    ) -> None:
+        self.events.append(
+            TraceEvent(
+                type=type, scope=scope, score=score, message=message, data=dict(data)
+            )
+        )
+
+    def to_dict(self) -> dict:
+        return {"events": [e.to_dict() for e in self.events]}
+
+
 @dataclass(frozen=True)
 class ResponseMeta:
     """Response-level metadata that lets the LLM discover ``expand``.
@@ -56,6 +107,8 @@ class RetrieveResponse:
 
     items: list[SearchHit] = field(default_factory=list)
     meta: ResponseMeta = field(default_factory=lambda: ResponseMeta(layer="full"))
+    trace: RetrievalTrace | None = None
+    """Hierarchical retrieval descent log; populated only when ``with_trace=True``."""
 
     def __iter__(self) -> Iterator[SearchHit]:
         return iter(self.items)

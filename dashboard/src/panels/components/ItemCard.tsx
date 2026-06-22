@@ -24,6 +24,7 @@ export function ItemCard({
   const [open, setOpen] = useState(defaultOpen);
   const { navigate } = useNav();
   const deleted = Boolean(item.deleted_at);
+  const ref = `contextseek://${item.scope}/${item.id}`;
 
   return (
     <Card className="overflow-hidden">
@@ -64,7 +65,7 @@ export function ItemCard({
           variant="ghost"
           size="icon"
           title={t("item.viewProvenance")}
-          onClick={() => navigate("provenance", { itemId: item.id })}
+          onClick={() => navigate("provenance", { itemId: ref })}
         >
           <GitGraph className="h-4 w-4" />
         </Button>

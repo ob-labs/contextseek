@@ -81,6 +81,7 @@ def test_http_retrieve_forwards_include_expired_and_returns_meta() -> None:
         filters=None,
         include_deleted=False,
         include_expired=True,
+        with_trace=False,
     )
     body = res.json()
     assert body["_meta"] == {
@@ -89,6 +90,7 @@ def test_http_retrieve_forwards_include_expired_and_returns_meta() -> None:
         "hint": "use expand",
     }
     assert body["items"][0]["id"] == "item-1"
+    assert body["items"][0]["scope"] == "tenant/project/session"
     assert body["items"][0]["content"] is None
 
 

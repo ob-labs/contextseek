@@ -156,7 +156,9 @@ export function WritePanel() {
             <Button
               variant="outline"
               size="sm"
-              onClick={() => navigate("provenance", { itemId: result.id })}
+              onClick={() =>
+                navigate("provenance", { itemId: `contextseek://${scope}/${result.id}` })
+              }
             >
               {t("write.goProvenance")}
             </Button>

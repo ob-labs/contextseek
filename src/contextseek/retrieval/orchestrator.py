@@ -11,13 +11,15 @@ from typing import Any, Callable
 from contextseek.storage.protocol import SeekVFSAdapter
 from contextseek.config import RetrievalStrategy
 from contextseek.domain.context_item import ContextItem
-from contextseek.domain.results import SearchHit
+from contextseek.domain.results import RetrievalTrace, SearchHit
 from contextseek.domain.serialization import deserialize_context_item
 from contextseek.domain.stages import STAGE_CONFIDENCE, Stage
 from contextseek.retrieval.components import (
+    CompositeRecallRoute,
     DefaultRecallRoute,
     GeoRecallRoute,
     HeuristicReranker,
+    HierarchicalRecallRoute,
     HybridRecallRoute,
     RecallRoute,
     RelationAwareReranker,
@@ -57,6 +59,7 @@ class RetrievalStats:
     returned_count: int
     hit_rate: float
     recall_paths: tuple[str, ...] = ()
+    trace: RetrievalTrace | None = None
 
 
 @dataclass
@@ -77,17 +80,28 @@ class RetrievalOrchestrator:
     embedder: Callable[[str], list[float]] | None = None
 
     def _build_recall_route(self, strategy: RetrievalStrategy) -> RecallRoute:
-        """Select recall route based on strategy config and embedder availability."""
+        """Select recall route based on strategy config and embedder availability.
+
+        When ``"hierarchical"`` is enabled (and an embedder is available) the
+        directory-recursive route runs as an extra RRF stream alongside the flat
+        text/vector route via :class:`CompositeRecallRoute`.
+        """
         if self.recall_route is not None:
             return self.recall_route
         enabled = set(strategy.recall_routes)
         has_vector = "vector" in enabled
-        has_text = bool(enabled - {"vector"})
+        has_text = bool(enabled - {"vector", "geo", "hierarchical"})
         if has_vector and self.embedder is not None:
-            if has_text:
-                return HybridRecallRoute(self.embedder)
-            return VectorRecallRoute(self.embedder)
-        return DefaultRecallRoute()
+            base: RecallRoute = (
+                HybridRecallRoute(self.embedder)
+                if has_text
+                else VectorRecallRoute(self.embedder)
+            )
+        else:
+            base = DefaultRecallRoute()
+        if "hierarchical" in enabled and self.embedder is not None:
+            return CompositeRecallRoute([base, HierarchicalRecallRoute(self.embedder)])
+        return base
 
     def _build_reranker(self, strategy: RetrievalStrategy) -> Reranker:
         """Select the reranker, wrapping it with relation-aware scoring.
@@ -116,6 +130,7 @@ class RetrievalOrchestrator:
         with_stats: bool = False,
         geo_query: Any | None = None,
         min_score: float | None = None,
+        with_trace: bool = False,
     ) -> list[SearchHit] | tuple[list[SearchHit], RetrievalStats]:
         """Recall, dedupe, rerank and return SearchHit results.
 
@@ -137,6 +152,12 @@ class RetrievalOrchestrator:
         strategy = self.strategy or RetrievalStrategy()
         recall_route = self._build_recall_route(strategy)
         reranker = self._build_reranker(strategy)
+
+        trace = RetrievalTrace() if with_trace else None
+        if trace is not None:
+            setter = getattr(recall_route, "set_trace", None)
+            if setter is not None:
+                setter(trace)
 
         # ─── Recall ───────────────────────────────────────────────
         recall_start = perf_counter()
@@ -336,6 +357,7 @@ class RetrievalOrchestrator:
             returned_count=returned_count,
             hit_rate=(returned_count / max(k, 1)),
             recall_paths=tuple(sorted(recall_paths)),
+            trace=trace,
         )
 
         if with_stats:

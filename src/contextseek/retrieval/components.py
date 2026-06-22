@@ -173,6 +173,370 @@ class HybridRecallRoute:
         )
 
 
+def _cosine(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two equal-length vectors (0.0 on mismatch/empty)."""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    if na <= 0.0 or nb <= 0.0:
+        return 0.0
+    return dot / (na * nb)
+
+
+class HierarchicalRecallRoute:
+    """Directory-recursive recall: navigate scope nodes' summaries best-first.
+
+    Instead of flat-scanning a prefix, this route walks the scope tree under the
+    search scope, scoring each child node by the cosine similarity between the
+    query and that node's L0 abstract embedding (written by
+    ``refresh_scope_summaries`` / ``compact``). Relevance propagates down
+    (``alpha*child + (1-alpha)*parent``) so a strong parent lifts its children;
+    items are collected from visited scopes and returned as a single ranked
+    stream that the orchestrator fuses via RRF like any other route.
+
+    Degrades safely to an empty stream when no embedder is configured or no
+    scope node carries an embedding (e.g. ``compact`` has not run yet), so the
+    phrase/vector routes still cover the query.
+    """
+
+    def __init__(self, embedder: Embedder, resolver: Any | None = None) -> None:
+        self._embedder = embedder
+        if resolver is None:
+            from contextseek.routing.resolver import ScopeResolver
+
+            resolver = ScopeResolver()
+        self._resolver = resolver
+        self._trace: Any | None = None
+        self._strategy: RetrievalStrategy | None = None
+
+    def set_trace(self, trace: Any | None) -> None:
+        """Attach a ``RetrievalTrace`` sink (called by the orchestrator)."""
+        self._trace = trace
+
+    def build_queries(
+        self, query: str, strategy: RetrievalStrategy
+    ) -> list[RecallQuery]:
+        cleaned = query.strip()
+        if not cleaned or "hierarchical" not in set(strategy.recall_routes):
+            return []
+        # Stash the strategy so recall() (which the protocol calls without it)
+        # can read hierarchical_* tuning. build_queries always runs first.
+        self._strategy = strategy
+        return [RecallQuery("hierarchical", cleaned)]
+
+    def _scope_of(self, prefix: str) -> str:
+        scheme = getattr(self._resolver, "scheme", "contextseek://")
+        return (
+            prefix[len(scheme) :].strip("/")
+            if prefix.startswith(scheme)
+            else prefix.strip("/")
+        )
+
+    def _node_embedding(
+        self, adapter: SeekVFSAdapter, scope: str
+    ) -> list[float] | None:
+        from contextseek.routing.resolver import SCOPE_NODE_ITEM_ID
+
+        node = adapter.read(self._resolver.ref_for(scope, SCOPE_NODE_ITEM_ID))
+        if not node:
+            return None
+        emb = node.get("embedding")
+        return emb if isinstance(emb, list) and emb else None
+
+    def recall(
+        self,
+        adapter: SeekVFSAdapter,
+        *,
+        prefix: str,
+        recall_query: RecallQuery,
+        k: int,
+    ) -> list[dict[str, object]]:
+        if self._embedder is None:
+            return []
+        try:
+            qv = self._embedder(recall_query.query)
+        except Exception:  # noqa: BLE001  # embedder errors must not crash recall
+            return []
+
+        root_scope = self._scope_of(prefix)
+        try:
+            refs = adapter.ls(prefix)
+        except Exception:  # noqa: BLE001
+            return []
+
+        # Build the scope tree under root from listed refs (string math only).
+        from contextseek.routing.resolver import is_scope_node_ref
+
+        # Group refs by their EXACT scope. Each item belongs to exactly one
+        # scope, so collection later touches every item at most once — no
+        # subtree re-scans as the descent moves through parent → child.
+        present: set[str] = set()
+        scope_item_refs: dict[str, list[str]] = {}
+        for ref in refs:
+            if is_scope_node_ref(ref):
+                continue
+            try:
+                s, _ = self._resolver.parse_ref(ref)
+            except (ValueError, AttributeError):
+                continue
+            present.add(s)
+            scope_item_refs.setdefault(s, []).append(ref)
+        if not present:
+            return []
+
+        tree: set[str] = set()
+        for s in present:
+            parts = s.strip("/").split("/")
+            for i in range(len(parts), 0, -1):
+                cand = "/".join(parts[:i])
+                if cand == root_scope or cand.startswith(root_scope + "/"):
+                    tree.add(cand)
+        tree.add(root_scope)
+
+        children: dict[str, list[str]] = {}
+        for s in tree:
+            if s == root_scope:
+                continue
+            parent = s.rsplit("/", 1)[0] if "/" in s else ""
+            if parent in tree:
+                children.setdefault(parent, []).append(s)
+
+        return self._descend(
+            adapter,
+            qv=qv,
+            root_scope=root_scope,
+            children=children,
+            scope_item_refs=scope_item_refs,
+            k=k,
+        )
+
+    def _read_payloads(
+        self, adapter: SeekVFSAdapter, refs: list[str]
+    ) -> dict[str, dict]:
+        """Read item payloads, using ``read_batch`` when the adapter exposes it."""
+        if not refs:
+            return {}
+        read_batch = getattr(adapter, "read_batch", None)
+        if read_batch is not None:
+            try:
+                return {r: p for r, p in read_batch(refs).items() if p is not None}
+            except Exception:  # noqa: BLE001
+                pass
+        out: dict[str, dict] = {}
+        for r in refs:
+            p = adapter.read(r)
+            if p is not None:
+                out[r] = p
+        return out
+
+    def _collect_direct_items(
+        self,
+        adapter: SeekVFSAdapter,
+        *,
+        qv: list[float],
+        refs: list[str],
+        collected: dict[str, dict[str, object]],
+    ) -> int:
+        """Score a scope's DIRECT items by query-vector cosine and collect them.
+
+        Pure local scoring over the items that live exactly in this scope: no
+        ``adapter.search`` prefix scan, so a parent visit never pulls its whole
+        subtree and each item is read at most once across the descent.
+        """
+        new_count = 0
+        for ref, payload in self._read_payloads(adapter, refs).items():
+            if payload.get("searchable") is False or payload.get("deleted_at"):
+                continue
+            emb = payload.get("embedding")
+            if not isinstance(emb, list) or not emb:
+                continue
+            key = str(payload.get("id") or ref)
+            if not key:
+                continue
+            score = _cosine(qv, emb)
+            hit = dict(payload)
+            hit["score"] = score
+            hit.setdefault("ref", ref)
+            existing = collected.get(key)
+            if existing is None or score > float(existing.get("score", 0.0)):
+                collected[key] = hit
+                new_count += 1
+        return new_count
+
+    def _descend(
+        self,
+        adapter: SeekVFSAdapter,
+        *,
+        qv: list[float],
+        root_scope: str,
+        children: dict[str, list[str]],
+        scope_item_refs: dict[str, list[str]],
+        k: int,
+    ) -> list[dict[str, object]]:
+        import heapq
+
+        from contextseek.config import RetrievalStrategy
+
+        strategy = self._strategy or RetrievalStrategy()
+        alpha = float(getattr(strategy, "hierarchical_alpha", 0.5))
+        max_rounds = int(getattr(strategy, "hierarchical_max_rounds", 24))
+        conv_rounds = int(getattr(strategy, "hierarchical_convergence_rounds", 3))
+        branch = int(getattr(strategy, "hierarchical_branch", 8))
+
+        trace = self._trace
+        collected: dict[str, dict[str, object]] = {}
+        any_embedding = False
+        has_any_children = bool(children)
+        node_emb_cache: dict[str, list[float] | None] = {}
+
+        def node_emb(scope: str) -> list[float] | None:
+            if scope not in node_emb_cache:
+                node_emb_cache[scope] = self._node_embedding(adapter, scope)
+            return node_emb_cache[scope]
+
+        # Heap of (-score, tiebreak, scope, parent_score). Seed with root anchor.
+        heap: list[tuple[float, int, str, float]] = [(-1.0, 0, root_scope, 1.0)]
+        seen_scopes: set[str] = set()
+        tiebreak = 1
+        visits = 0
+        stable = 0
+        last_top: tuple[str, ...] = ()
+
+        while heap and visits < max_rounds:
+            neg_score, _, scope, parent_score = heapq.heappop(heap)
+            if scope in seen_scopes:
+                continue
+            seen_scopes.add(scope)
+            visits += 1
+            node_score = -neg_score
+            if node_emb(scope) is not None:
+                any_embedding = True
+
+            if trace is not None:
+                trace.add(
+                    "descend",
+                    scope=scope,
+                    score=node_score,
+                    message=f"visit {scope}",
+                )
+
+            # Collect only this scope's DIRECT items (no subtree prefix scan).
+            new_for_scope = self._collect_direct_items(
+                adapter,
+                qv=qv,
+                refs=scope_item_refs.get(scope, []),
+                collected=collected,
+            )
+            if trace is not None:
+                trace.add(
+                    "leaf_recall",
+                    scope=scope,
+                    score=node_score,
+                    message=f"collected {new_for_scope} items",
+                    items=new_for_scope,
+                )
+
+            # Expand children, scored by node-embedding similarity + propagation.
+            kids = children.get(scope, [])
+            scored_kids: list[tuple[float, str]] = []
+            for c in kids:
+                emb = node_emb(c)
+                if emb is None:
+                    sim = parent_score * 0.5  # no summary yet → inherit, damped
+                else:
+                    any_embedding = True
+                    sim = _cosine(qv, emb)
+                final = alpha * sim + (1.0 - alpha) * node_score
+                scored_kids.append((final, c))
+                if trace is not None:
+                    trace.add("node_score", scope=c, score=final, message="child score")
+            scored_kids.sort(reverse=True)
+            for final, c in scored_kids[:branch]:
+                if c not in seen_scopes:
+                    tiebreak += 1
+                    heapq.heappush(heap, (-final, tiebreak, c, node_score))
+
+            # Convergence: stop when the top-k id set is unchanged.
+            top = tuple(
+                sorted(
+                    collected,
+                    key=lambda kk: float(collected[kk].get("score", 0.0)),
+                    reverse=True,
+                )[:k]
+            )
+            if top and top == last_top:
+                stable += 1
+                if stable >= conv_rounds:
+                    if trace is not None:
+                        trace.add("converged", message=f"stable {stable} rounds")
+                    break
+            else:
+                stable = 0
+                last_top = top
+
+        # When there are sub-scopes to navigate but none carry a summary
+        # embedding (e.g. compact never ran), this route can't navigate
+        # meaningfully — yield nothing so the flat routes own the result. A
+        # single leaf scope with a summary still returns its collected items.
+        if has_any_children and not any_embedding:
+            return []
+
+        results = sorted(
+            collected.values(),
+            key=lambda it: float(it.get("score", 0.0)),
+            reverse=True,
+        )
+        return results
+
+
+class CompositeRecallRoute:
+    """Run several recall routes as independent RRF streams.
+
+    Each sub-route's queries are tagged with their owner so :meth:`recall`
+    dispatches back to the route that produced them. Used to run the
+    hierarchical route alongside the flat text/vector route.
+    """
+
+    def __init__(self, routes: list[Any]) -> None:
+        self._routes = routes
+
+    def set_trace(self, trace: Any | None) -> None:
+        for r in self._routes:
+            setter = getattr(r, "set_trace", None)
+            if setter is not None:
+                setter(trace)
+
+    def build_queries(
+        self, query: str, strategy: RetrievalStrategy
+    ) -> list[RecallQuery]:
+        out: list[RecallQuery] = []
+        for idx, route in enumerate(self._routes):
+            for q in route.build_queries(query, strategy):
+                out.append(
+                    RecallQuery(
+                        q.route_name, q.query, metadata={**q.metadata, "_owner": idx}
+                    )
+                )
+        return out
+
+    def recall(
+        self,
+        adapter: SeekVFSAdapter,
+        *,
+        prefix: str,
+        recall_query: RecallQuery,
+        k: int,
+    ) -> list[dict[str, object]]:
+        owner = int(recall_query.metadata.get("_owner", 0))
+        if owner < 0 or owner >= len(self._routes):
+            return []
+        return self._routes[owner].recall(
+            adapter, prefix=prefix, recall_query=recall_query, k=k
+        )
+
+
 class HeuristicReranker:
     """Local reranker using backend score, token overlap, evidence and feedback."""
 

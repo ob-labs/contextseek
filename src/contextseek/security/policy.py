@@ -75,7 +75,12 @@ def can_access_payload(
     """Evaluate ACL and scope ownership for one payload and action."""
     payload_scope = str(payload.get("scope", ""))
     if payload_scope and payload_scope != scope:
-        return False
+        # Reads may cross into the queried scope's subtree so hierarchical
+        # retrieval can surface items from sub-scopes; writes / manage stay
+        # exact-scope. Per-item ACL below is derived from the item's own scope.
+        in_subtree = payload_scope.startswith(scope.rstrip("/") + "/")
+        if not (action == "read" and in_subtree):
+            return False
     if not strategy.acl_enabled:
         return True
     source_meta = dict(payload.get("source_meta", {}))
@@ -83,8 +88,10 @@ def can_access_payload(
     if not isinstance(acl, dict):
         return True
 
-    # Extract subject from scope string (format: tenant/project/subject)
-    parts = scope.split("/")
+    # Extract subject/tenant from the item's OWN scope (format:
+    # tenant/project/subject) so subtree reads enforce each item's ACL.
+    eff_scope = payload_scope or scope
+    parts = eff_scope.split("/")
     subject_id = parts[-1] if parts else ""
     tenant_id = parts[0] if parts else ""
 

@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { AsyncButton } from "@/components/common/AsyncButton";
 import { EmptyState } from "@/components/common/EmptyState";
+import { HelpHint } from "@/components/common/HelpHint";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -13,6 +14,7 @@ import { useScope } from "@/context/ScopeContext";
 import { useAsyncFn } from "@/lib/utils";
 import type { RetrieveResponse } from "@/lib/types";
 import { HitCard } from "./components/HitCard";
+import { TraceView } from "./components/TraceView";
 
 export function RetrievePanel() {
   const { t } = useI18n();
@@ -21,6 +23,7 @@ export function RetrievePanel() {
   const [k, setK] = useState(10);
   const [full, setFull] = useState(false);
   const [includeDeleted, setIncludeDeleted] = useState(false);
+  const [includeTrace, setIncludeTrace] = useState(false);
   const [filtersText, setFiltersText] = useState("");
   const [filterError, setFilterError] = useState<string>("");
 
@@ -37,7 +40,15 @@ export function RetrievePanel() {
         return;
       }
     }
-    run({ scope, query, k, full, include_deleted: includeDeleted, filters });
+    run({
+      scope,
+      query,
+      k,
+      full,
+      include_deleted: includeDeleted,
+      include_trace: includeTrace,
+      filters,
+    });
   };
 
   return (
@@ -80,6 +91,14 @@ export function RetrievePanel() {
               />
               {t("retrieve.includeDeleted")}
             </label>
+            <label className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={includeTrace}
+                onChange={(e) => setIncludeTrace(e.target.checked)}
+              />
+              {t("retrieve.trace")}
+            </label>
             <AsyncButton loading={loading} onClick={submit} disabled={!query.trim()}>
               <Search className="h-4 w-4" /> {t("retrieve.action")}
             </AsyncButton>
@@ -99,9 +118,18 @@ export function RetrievePanel() {
 
       {data && (
         <div className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-          layer={data._meta.layer} · full_via={data._meta.full_via}
-          {data._meta.hint && <> · {data._meta.hint}</>}
+          <div className="flex items-start justify-between gap-2">
+            <span>
+              layer={data._meta.layer} · full_via={data._meta.full_via}
+              {data._meta.hint && <> · {data._meta.hint}</>}
+            </span>
+            <HelpHint content={t("retrieve.metaHint")} />
+          </div>
         </div>
+      )}
+
+      {data?._trace && data._trace.events.length > 0 && (
+        <TraceView trace={data._trace} />
       )}
 
       <EmptyState

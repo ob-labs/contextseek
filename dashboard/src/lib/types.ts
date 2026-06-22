@@ -62,6 +62,7 @@ export interface ContextItem {
 
 export interface SearchHit {
   id: string;
+  scope: string;
   score: number;
   layer: Layer;
   summary: string;
@@ -78,9 +79,22 @@ export interface RetrieveMeta {
   hint: string;
 }
 
+export interface TraceEvent {
+  type: string;
+  scope: string;
+  score: number;
+  message: string;
+  data: Record<string, unknown>;
+}
+
+export interface RetrievalTrace {
+  events: TraceEvent[];
+}
+
 export interface RetrieveResponse {
   items: SearchHit[];
   _meta: RetrieveMeta;
+  _trace?: RetrievalTrace;
 }
 
 export interface AddResponse {
@@ -281,6 +295,7 @@ export interface RetrieveRequest {
   full?: boolean;
   filters?: Record<string, unknown> | null;
   include_deleted?: boolean;
+  include_trace?: boolean;
 }
 
 export interface ExpandRequest {

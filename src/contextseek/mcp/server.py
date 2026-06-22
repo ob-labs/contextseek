@@ -49,6 +49,7 @@ class ContextSeekMCPServer:
                     "k": {"type": "integer", "default": 10},
                     "full": {"type": "boolean", "default": False},
                     "include_expired": {"type": "boolean", "default": False},
+                    "include_trace": {"type": "boolean", "default": False},
                 },
             },
             {
@@ -186,11 +187,13 @@ class ContextSeekMCPServer:
                 k=arguments.get("k", 10),
                 full=bool(arguments.get("full", False)),
                 include_expired=bool(arguments.get("include_expired", False)),
+                with_trace=bool(arguments.get("include_trace", False)),
             )
-            return {
+            result = {
                 "items": [
                     {
                         "id": h.item.id,
+                        "scope": h.item.scope,
                         "score": h.score,
                         "layer": h.layer,
                         "summary": h.item.summary,
@@ -204,6 +207,9 @@ class ContextSeekMCPServer:
                     "hint": response.meta.hint,
                 },
             }
+            if response.trace is not None:
+                result["_trace"] = response.trace.to_dict()
+            return result
 
         if name == "contextseek_expand":
             scope = arguments["scope"]

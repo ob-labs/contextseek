@@ -2,6 +2,7 @@ import { GitGraph } from "lucide-react";
 import { useState } from "react";
 
 import { ConfidenceBar } from "@/components/common/ConfidenceBar";
+import { HelpHint } from "@/components/common/HelpHint";
 import { JsonView } from "@/components/common/JsonView";
 import { AsyncButton } from "@/components/common/AsyncButton";
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +22,7 @@ export function HitCard({ hit }: { hit: SearchHit }) {
   const [full, setFull] = useState<unknown>(hit.layer === "full" ? hit.content : null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const ref = `contextseek://${hit.scope}/${hit.id}`;
 
   const expand = async () => {
     setLoading(true);
@@ -40,14 +42,20 @@ export function HitCard({ hit }: { hit: SearchHit }) {
       <div className="flex items-start justify-between gap-2">
         <div className="flex min-w-0 flex-1 flex-col gap-1">
           <div className="flex flex-wrap items-center gap-2">
-            <ConfidenceBar value={hit.score} label="score" />
-            <Badge variant="outline">{hit.layer}</Badge>
+            <ConfidenceBar value={hit.score} label={t("hit.finalScore")} />
+            <HelpHint content={t("hit.finalScoreHint")} />
+            <Badge variant="outline">layer:{hit.layer}</Badge>
             {hit.recall_path && (
               <Badge variant="secondary" className="font-normal">
-                {hit.recall_path}
+                recall:{hit.recall_path}
               </Badge>
             )}
-            <span className="font-mono text-xs text-muted-foreground">{hit.id}</span>
+            <Badge variant="outline" className="font-mono text-[11px]" title={`scope: ${hit.scope}`}>
+              scope:{hit.scope}
+            </Badge>
+            <span className="font-mono text-xs text-muted-foreground" title={ref}>
+              id:{hit.id}
+            </span>
           </div>
           <p className="text-sm">{hit.summary || t("hit.noSummary")}</p>
         </div>
@@ -55,7 +63,7 @@ export function HitCard({ hit }: { hit: SearchHit }) {
           variant="ghost"
           size="icon"
           title={t("hit.viewProvenance")}
-          onClick={() => navigate("provenance", { itemId: hit.id })}
+          onClick={() => navigate("provenance", { itemId: ref })}
         >
           <GitGraph className="h-4 w-4" />
         </Button>
@@ -69,6 +77,7 @@ export function HitCard({ hit }: { hit: SearchHit }) {
             {t}
           </Badge>
         ))}
+        <span className="font-mono break-all">· ref {ref}</span>
       </div>
 
       {full != null ? (

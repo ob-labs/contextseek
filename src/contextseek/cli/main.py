@@ -100,6 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="comma-separated tag filter; returned items must contain all tags",
     )
     retrieve_parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="record and show the hierarchical retrieval descent trajectory",
+    )
+    retrieve_parser.add_argument(
         "--verbose",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -545,6 +550,7 @@ def run_cli(
                 k=args.k,
                 full=args.full,
                 tags=tags or None,
+                with_trace=args.trace,
             )
         output = {
             "items": [
@@ -566,6 +572,8 @@ def run_cli(
                 "hint": response.meta.hint,
             },
         }
+        if response.trace is not None:
+            output["_trace"] = response.trace.to_dict()
         if args.json:
             print(json.dumps(output, ensure_ascii=False))
         else:

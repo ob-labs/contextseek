@@ -73,6 +73,18 @@ class RetrievalStrategy:
     # orchestrator layer. Industry convention is k=60; smaller values amplify
     # rank differences, larger values smooth them out.
     rrf_k: int = 60
+    # Hierarchical (directory-recursive) recall. Opt-in via adding "hierarchical"
+    # to recall_routes. Navigates scope nodes' L0/L1 summaries best-first instead
+    # of flat-scanning a prefix; requires node summaries (refresh_scope_summaries
+    # / compact) and an embedder, else it degrades to an empty stream.
+    # Score propagation: child_final = alpha*child_sim + (1-alpha)*parent_score.
+    hierarchical_alpha: float = 0.5
+    # Max scope nodes visited (descent budget) before stopping.
+    hierarchical_max_rounds: int = 24
+    # Stop early when the top result set is unchanged for this many visits.
+    hierarchical_convergence_rounds: int = 3
+    # Max child scopes expanded from any one node.
+    hierarchical_branch: int = 8
 
 
 HYBRID_RETRIEVAL_STRATEGY = RetrievalStrategy(

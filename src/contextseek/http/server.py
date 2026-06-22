@@ -45,6 +45,7 @@ class RetrieveRequest(BaseModel):
     filters: dict[str, Any] | None = None
     include_deleted: bool = False
     include_expired: bool = False
+    include_trace: bool = False
 
 
 class ExpandRequest(BaseModel):
@@ -387,11 +388,13 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
             filters=req.filters,
             include_deleted=req.include_deleted,
             include_expired=req.include_expired,
+            with_trace=req.include_trace,
         )
-        return {
+        out: dict[str, Any] = {
             "items": [
                 {
                     "id": h.item.id,
+                    "scope": h.item.scope,
                     "score": h.score,
                     "layer": h.layer,
                     "summary": h.item.summary,
@@ -409,6 +412,9 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
                 "hint": response.meta.hint,
             },
         }
+        if response.trace is not None:
+            out["_trace"] = response.trace.to_dict()
+        return out
 
     @app.post("/expand")
     async def expand(req: ExpandRequest) -> dict[str, Any]:

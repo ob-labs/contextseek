@@ -6,6 +6,17 @@ All ContextItems under a scope share a single URI prefix.
 
 from __future__ import annotations
 
+# Reserved item id used to store a scope node's aggregated L0/L1 summary.
+# Written at ``{scheme}{scope}/__node__`` with ``searchable=False`` so it never
+# surfaces in normal retrieval; it powers hierarchical navigation and directory
+# overviews. Enumeration paths skip refs ending in this segment.
+SCOPE_NODE_ITEM_ID = "__node__"
+
+
+def is_scope_node_ref(ref: str) -> bool:
+    """Whether *ref* points to a reserved scope-node summary item."""
+    return ref.rstrip("/").endswith("/" + SCOPE_NODE_ITEM_ID)
+
 
 class ScopeResolver:
     """Resolves scope strings to storage URI prefixes.

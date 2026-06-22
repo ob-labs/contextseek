@@ -232,6 +232,7 @@ def render_retrieve(scope: str, query: str, response: Any) -> None:
             console.print(
                 Panel(response.meta.hint, title="Hint", border_style="yellow")
             )
+        render_trace(getattr(response, "trace", None))
         return
 
     print()
@@ -254,6 +255,35 @@ def render_retrieve(scope: str, query: str, response: Any) -> None:
         if item.abstract:
             print(f"      L0 abstract: {_clean_preview(item.abstract, max_chars=300)}")
         print(f"      {_clean_preview(item.summary or item.content_text)}")
+        print()
+    render_trace(getattr(response, "trace", None))
+
+
+def render_trace(trace: Any) -> None:
+    """Render the hierarchical retrieval descent (when present)."""
+    if trace is None or not getattr(trace, "events", None):
+        return
+    lines: list[str] = []
+    for ev in trace.events:
+        depth = ev.scope.count("/") if ev.scope else 0
+        indent = "  " * depth
+        if ev.type == "descend":
+            lines.append(f"{indent}→ {ev.scope}  (score {ev.score:.3f})")
+        elif ev.type == "leaf_recall":
+            n = ev.data.get("items", 0)
+            if n:
+                lines.append(f"{indent}    · collected {n} item(s)")
+        elif ev.type == "converged":
+            lines.append(f"  ⓘ {ev.message}")
+    if not lines:
+        return
+    body = "\n".join(lines)
+    if console:
+        console.print(Panel(body, title="Retrieval trajectory", border_style="cyan"))
+    else:
+        print("  Retrieval trajectory:")
+        for ln in lines:
+            print("   " + ln)
         print()
 
 
