@@ -39,12 +39,20 @@ def _asgi_post(app: Any, path: str, **kwargs: Any) -> Any:
 
 
 def _proxy_app(ctx: ContextSeek) -> Any:
+    proxy_http = _proxy_http_module()
     fastapi = pytest.importorskip("fastapi", reason="http extra not installed")
-    from contextseek.plugs.core.proxy.http import create_plug_proxy_router
 
     app = fastapi.FastAPI()
-    app.include_router(create_plug_proxy_router(ctx))
+    app.include_router(proxy_http.create_plug_proxy_router(ctx))
     return app
+
+
+def _proxy_http_module() -> Any:
+    pytest.importorskip("fastapi", reason="http extra not installed")
+    return pytest.importorskip(
+        "contextseek.plugs.core.proxy.http",
+        reason="http extra not installed",
+    )
 
 
 def _contextseek(tmp_path: Path) -> tuple[ContextSeek, SQLiteBackend]:
@@ -644,7 +652,8 @@ def test_powermem_proxy_marks_partial_failed_with_207(
         return original_apply(self, event)
 
     monkeypatch.setattr(
-        "contextseek.plugs.core.proxy.http._build_plug",
+        _proxy_http_module(),
+        "_build_plug",
         lambda _plug_name, _instance_id, _body, registry=None: FakePlug(),
     )
     monkeypatch.setattr(PlugGateway, "apply", fail_one)
@@ -687,7 +696,8 @@ def test_powermem_proxy_marks_all_failed_with_502(
         raise RuntimeError(f"materialization failed: {event.external_id}")
 
     monkeypatch.setattr(
-        "contextseek.plugs.core.proxy.http._build_plug",
+        _proxy_http_module(),
+        "_build_plug",
         lambda _plug_name, _instance_id, _body, registry=None: FakePlug(),
     )
     monkeypatch.setattr(PlugGateway, "apply", fail_apply)
@@ -713,10 +723,7 @@ def test_powermem_proxy_returns_503_when_plug_is_not_configured(
     def fail_build(_plug_name, _instance_id, _body, registry=None):
         raise ValueError("missing base url")
 
-    monkeypatch.setattr(
-        "contextseek.plugs.core.proxy.http._build_plug",
-        fail_build,
-    )
+    monkeypatch.setattr(_proxy_http_module(), "_build_plug", fail_build)
     app = _proxy_app(ctx)
 
     response = _asgi_post(
@@ -747,7 +754,8 @@ def test_powermem_proxy_preserves_non_dict_response_body(
             )
 
     monkeypatch.setattr(
-        "contextseek.plugs.core.proxy.http._build_plug",
+        _proxy_http_module(),
+        "_build_plug",
         lambda _plug_name, _instance_id, _body, registry=None: FakePlug(),
     )
     app = _proxy_app(ctx)

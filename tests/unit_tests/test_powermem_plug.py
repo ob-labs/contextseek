@@ -10,6 +10,7 @@ import pytest
 
 from contextseek import ContextSeek
 from contextseek.cli.main import _plug_install_status, run_cli
+import contextseek.plugs.core.runtime as plug_runtime
 from contextseek.plugs.core.proxy.mcp import PlugMCPProxy
 from contextseek.plugs import PowerMemPlug, PowerMemProxyPlug
 from contextseek.plugs.powermem import PowerMemAdapter
@@ -736,6 +737,11 @@ def test_proxy_install_openclaw_installs_missing_powermem_package(
     monkeypatch.setenv(
         "CONTEXTSEEK_POWERMEM_PACKAGE_INSTALL_COMMAND",
         f"{fake_installer} {{requirement}}",
+    )
+    monkeypatch.setattr(
+        plug_runtime.PythonPackageRuntimeInstaller,
+        "_runtime_ready",
+        lambda self, python: True,
     )
     plug = PowerMemProxyPlug(base_url="http://powermem.local")
 
