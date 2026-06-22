@@ -171,7 +171,7 @@ Features:
 
 ## Command reference
 
-> Convention: `retrieve` / `overview` / `lint` print human-readable rich text by default (add `--json` for machine output), and `sync` / `skill-export` print rich panels. All other commands print **JSON** to stdout.
+> Convention: `retrieve` / `overview` / `lint` print human-readable rich text by default (add `--json` for machine output), and `sync` / `skill-export` print rich panels. Server/process commands such as `daemon` and `desktop-server` print status logs; most other data commands print **JSON** to stdout.
 
 ### Write & retrieve
 
@@ -251,12 +251,14 @@ contextseek skill-export --scope me/work --out ~/.contextseek/skills --dry-run
 
 ### Ops
 
-| Command | Description |
-|---------|-------------|
-| `metrics` | Print Prometheus-format metrics |
+| Command | Key args | Description |
+|---------|----------|-------------|
+| `metrics` | — | Print Prometheus-format metrics |
+| `desktop-server` | `--host` `--port` `--data-dir` `--log-level` | Run the same-origin backend for the desktop app: HTTP API plus the built dashboard SPA |
 
 ```bash
 contextseek metrics
+contextseek desktop-server --host 127.0.0.1 --port 8000
 ```
 
 ---
