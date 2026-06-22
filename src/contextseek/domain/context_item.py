@@ -109,6 +109,20 @@ class ContextItem:
     deleted_at: datetime | None = None
     deleted_reason: str | None = None
 
+    # ═══════════════════════════════════════════
+    # Bi-temporal validity (event time, not ingest time)
+    # ═══════════════════════════════════════════
+    valid_from: datetime | None = None
+    """Event time the fact became true. None falls back to ``created_at``."""
+
+    valid_to: datetime | None = None
+    """Event time the fact stopped being true. None means currently valid.
+    Closing this window (instead of deleting) is how conflicting updates retire
+    a superseded fact while keeping it for temporal/audit queries."""
+
+    invalidated_reason: str | None = None
+    """Why the validity window was closed (e.g. ``superseded_by_update``)."""
+
     def __post_init__(self) -> None:
         if not self.hash:
             self.hash = _compute_hash(self.content)
@@ -120,6 +134,32 @@ class ContextItem:
     @property
     def is_deleted(self) -> bool:
         return self.deleted_at is not None
+
+    def is_valid_at(self, when: datetime | None = None) -> bool:
+        """Whether the fact's validity window is open at *when* (default: now).
+
+        A None ``valid_to`` means the window is still open. ``valid_from`` is
+        honoured when set, so facts dated to the future are not yet valid.
+        """
+        moment = when or _utc_now()
+        if self.valid_from is not None and moment < self.valid_from:
+            return False
+        if self.valid_to is not None and moment >= self.valid_to:
+            return False
+        return True
+
+    def close_validity(
+        self, *, reason: str | None = None, at: datetime | None = None
+    ) -> None:
+        """Close the validity window without deleting the row.
+
+        The item stays in storage (and retains its embedding/links) so temporal
+        queries can still reach it; default retrieval skips it once ``valid_to``
+        is in the past.
+        """
+        self.valid_to = at or _utc_now()
+        self.invalidated_reason = reason
+        self.updated_at = _utc_now()
 
     @property
     def content_text(self) -> str:

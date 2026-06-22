@@ -4,6 +4,7 @@ raw → extracted → knowledge → skill
 Plus dreaming: consolidation + divergence for creative evolution.
 """
 
+from contextseek.evolution.conflict import ConflictResolution, ConflictResolver
 from contextseek.evolution.engine import EvolutionEngine
 from contextseek.evolution.extractor import (
     GeoExtractor,
@@ -19,10 +20,14 @@ from contextseek.evolution.dreaming import (
     DivergenceResult,
     DreamEngine,
     DreamReport,
+    PitfallReflector,
+    PitfallResult,
 )
 from contextseek.evolution.rules import EvolutionRule, DEFAULT_RULES
 
 __all__ = [
+    "ConflictResolution",
+    "ConflictResolver",
     "ConsolidationEngine",
     "ConsolidationResult",
     "ConvergenceMerger",
@@ -36,5 +41,7 @@ __all__ = [
     "GeoExtractor",
     "HeuristicExtractor",
     "LLMExtractor",
+    "PitfallReflector",
+    "PitfallResult",
     "SkillDistiller",
 ]

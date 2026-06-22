@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import math
 from time import perf_counter
 from typing import Any, Callable
@@ -24,6 +25,25 @@ from contextseek.retrieval.components import (
     VectorRecallRoute,
 )
 from contextseek.routing.resolver import ScopeResolver
+
+
+def _is_expired(payload: dict[str, object], *, when: datetime | None = None) -> bool:
+    """Whether a serialized item's bi-temporal validity window has closed.
+
+    Items predating the bi-temporal fields have no ``valid_to`` and are treated
+    as always-valid, so legacy data keeps surfacing unchanged.
+    """
+    raw = payload.get("valid_to")
+    if not raw:
+        return False
+    try:
+        valid_to = datetime.fromisoformat(str(raw))
+    except (TypeError, ValueError):
+        return False
+    if valid_to.tzinfo is None:
+        valid_to = valid_to.replace(tzinfo=timezone.utc)
+    moment = when or datetime.now(timezone.utc)
+    return moment >= valid_to
 
 
 @dataclass(frozen=True)
@@ -92,6 +112,7 @@ class RetrievalOrchestrator:
         stage: Stage | None = None,
         tags: list[str] | None = None,
         include_deleted: bool = False,
+        include_expired: bool = False,
         with_stats: bool = False,
         geo_query: Any | None = None,
         min_score: float | None = None,
@@ -180,6 +201,8 @@ class RetrievalOrchestrator:
         # ``ctx._list_items``) bypass this filter and still see the row.
         def _keep(h: dict[str, object]) -> bool:
             if not include_deleted and h.get("deleted_at"):
+                return False
+            if not include_expired and _is_expired(h):
                 return False
             if h.get("searchable", True) is False:
                 return False

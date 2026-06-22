@@ -13,6 +13,7 @@ from contextseek.domain.context_item import ContextItem
 from contextseek.domain.inference import _is_trace_structure
 from contextseek.domain.results import CompactReport
 from contextseek.domain.stages import Stage
+from contextseek.evolution.conflict import ConflictResolver
 from contextseek.evolution.distiller import HeuristicDistillRule, SkillDistiller
 from contextseek.evolution.extractor import Extractor, HeuristicExtractor
 from contextseek.evolution.merger import ConvergenceMerger
@@ -39,6 +40,8 @@ class EvolutionEngine:
         distill_decide_fn: Callable[[ContextItem], bool] | None = None,
         distill_render_fn: Callable[[ContextItem], dict[str, str]] | None = None,
         summarizer: Any | None = None,
+        conflict_resolver: ConflictResolver | None = None,
+        enable_conflict_resolution: bool = True,
     ):
         self._rules = rules or DEFAULT_RULES
 
@@ -110,6 +113,20 @@ class EvolutionEngine:
         )
         self._summarizer = summarizer
 
+        conflict_threshold = 0.82
+        enable_conflict = enable_conflict_resolution
+        if strategy is not None:
+            conflict_threshold = getattr(
+                strategy, "conflict_sim_threshold", conflict_threshold
+            )
+            enable_conflict = getattr(
+                strategy, "conflict_resolution_enabled", enable_conflict
+            )
+        self._enable_conflict = enable_conflict
+        self._conflict_resolver = conflict_resolver or ConflictResolver(
+            similarity_threshold=conflict_threshold,
+        )
+
     def evolve(
         self, items: list[ContextItem]
     ) -> tuple[list[ContextItem], list[ContextItem], CompactReport]:
@@ -125,12 +142,21 @@ class EvolutionEngine:
         archived_items: list[ContextItem] = []
         report = CompactReport()
 
+        # Phase 0: conflict resolution (update vs drift). Runs first so retired
+        # facts and quarantined drift don't feed downstream extraction/merge.
+        if self._enable_conflict:
+            resolution = self._conflict_resolver.resolve(items)
+            archived_items.extend(resolution.touched)
+            report.conflict_updated_count = len(resolution.updated)
+            report.conflict_drift_count = len(resolution.quarantined)
+
         # Phase 1: raw → extracted (trace extraction)
         raw_traces = [
             it
             for it in items
             if it.stage == Stage.raw
             and not it.is_deleted
+            and it.is_valid_at()
             and self._eligible_for_extraction(it)
         ]
         for item in raw_traces:
@@ -145,7 +171,9 @@ class EvolutionEngine:
 
         # Phase 2: extracted → knowledge (convergence merge)
         extracted_items = [
-            it for it in items if it.stage == Stage.extracted and not it.is_deleted
+            it
+            for it in items
+            if it.stage == Stage.extracted and not it.is_deleted and it.is_valid_at()
         ]
         # Include newly extracted items
         all_extracted = extracted_items + [
@@ -178,7 +206,9 @@ class EvolutionEngine:
 
         # Phase 3: knowledge → skill (distillation)
         knowledge_items = [
-            it for it in items if it.stage == Stage.knowledge and not it.is_deleted
+            it
+            for it in items
+            if it.stage == Stage.knowledge and not it.is_deleted and it.is_valid_at()
         ]
         candidates = self._distiller.identify_candidates(knowledge_items)
         for candidate in candidates:
@@ -194,6 +224,7 @@ class EvolutionEngine:
             it
             for it in items
             if not it.is_deleted
+            and it.is_valid_at()
             and it.stage != Stage.skill
             and it.id not in distilled_ids
         ]

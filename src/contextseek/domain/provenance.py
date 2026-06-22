@@ -40,6 +40,9 @@ class SourceType(str, Enum):
     dream_divergence = "dream_divergence"
     """Emitted by divergence dreaming."""
 
+    pitfall_reflection = "pitfall_reflection"
+    """Avoid-this rule distilled from failed execution traces."""
+
 
 # Core source_type → default confidence (domain extensions use the registry below)
 SOURCE_TYPE_CONFIDENCE: dict[SourceType, float] = {
@@ -52,6 +55,7 @@ SOURCE_TYPE_CONFIDENCE: dict[SourceType, float] = {
     SourceType.merge_result: 0.7,
     SourceType.dream_consolidation: 0.4,
     SourceType.dream_divergence: 0.3,
+    SourceType.pitfall_reflection: 0.55,
 }
 
 

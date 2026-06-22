@@ -96,6 +96,10 @@ class EvolutionStrategy:
     distill_min_relevance_boost: float = 1.2
     # Archival
     ephemeral_ttl_seconds: float = 3600.0
+    # Conflict resolution (update vs drift). Same-subject similarity above which
+    # two differing items are compared for contradiction.
+    conflict_resolution_enabled: bool = True
+    conflict_sim_threshold: float = 0.82
     # Evidence chain
     reverification_threshold: float = 0.4
     # Enable LLM synthesis when merging extracted clusters
@@ -132,6 +136,12 @@ class DreamStrategy:
     cooldown_hours: float = 6.0
     # Enable LLM for consolidation pattern extraction and divergence hypothesis
     llm_enabled: bool = False
+    # Failure-driven reflection: distil "avoid this" pitfall rules from failed
+    # execution traces during the dream cycle.
+    pitfall_reflection_enabled: bool = True
+    pitfall_min_failures: int = 2
+    pitfall_max_outputs: int = 5
+    pitfall_initial_confidence: float = 0.55
 
 
 @dataclass(frozen=True)

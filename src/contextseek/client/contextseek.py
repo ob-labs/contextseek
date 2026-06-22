@@ -665,6 +665,7 @@ class ContextSeek:
         tags: list[str] | None = None,
         filters: dict[str, Any] | None = None,
         include_deleted: bool = False,
+        include_expired: bool = False,
         geo_query: "Any | None" = None,
         min_score: float | None = None,
     ) -> RetrieveResponse:
@@ -685,6 +686,10 @@ class ContextSeek:
             tags: Optional tag filter (all tags must match).
             filters: Compatibility bag; may include ``stage`` / ``tags`` / ``min_confidence``.
             include_deleted: Whether soft-deleted items are visible.
+            include_expired: Whether items whose bi-temporal validity window has
+                closed (``valid_to`` in the past) are visible. Default False, so
+                superseded facts are hidden from normal retrieval but remain for
+                temporal/audit queries.
 
         Returns:
             :class:`RetrieveResponse` iterable as ``for hit in response``.
@@ -724,6 +729,7 @@ class ContextSeek:
             stage=stage_filter,
             tags=tag_filter,
             include_deleted=include_deleted,
+            include_expired=include_expired,
             geo_query=geo_query,
             min_score=min_score,
         )
@@ -1388,6 +1394,86 @@ class ContextSeek:
             },
         )
 
+    def record_utility(
+        self,
+        *,
+        scope: str,
+        retrieved_ids: list[str],
+        used_ids: list[str],
+        reward: float = 0.3,
+        penalty: float = 0.1,
+        decay_unused: bool = True,
+    ) -> dict[str, int]:
+        """Close the retrieval→outcome loop ("use it or lose it").
+
+        Call this after an agent turn with the ids that were retrieved and the
+        subset that actually informed the answer. Used items gain
+        ``relevance_boost``/``importance`` and an access tick (which also feeds
+        distillation); retrieved-but-unused items decay, so persistently useless
+        context sinks in future rankings and is reclaimed sooner.
+
+        The boost flows into the reranker via the relevance_boost feedback
+        channel, and importance feeds the decay score — so a single call moves
+        both ranking and lifecycle.
+
+        Args:
+            scope: Scope the items belong to.
+            retrieved_ids: All item ids surfaced by the retrieval.
+            used_ids: Ids that were actually used (subset of retrieved_ids).
+            reward: relevance_boost delta for used items.
+            penalty: relevance_boost decrement for unused items.
+            decay_unused: When False, unused items are left untouched.
+
+        Returns:
+            ``{"rewarded": n, "penalized": m}`` counts of items mutated.
+        """
+        used = set(used_ids)
+        rewarded = 0
+        penalized = 0
+        now = _utc_now()
+
+        for item_id in dict.fromkeys(retrieved_ids):  # dedupe, preserve order
+            ref = self.resolver.ref_for(scope, item_id)
+            payload = self.adapter.read(ref)
+            if payload is None:
+                continue
+            item = deserialize_context_item(payload)
+
+            if item_id in used:
+                item.relevance_boost = max(0.1, min(5.0, item.relevance_boost + reward))
+                item.access_count += 1
+                item.last_accessed_at = now
+                item.importance = min(5.0, item.importance + reward * 0.2)
+                if (
+                    item.relevance_boost >= 2.0
+                    and "evolution_candidate" not in item.tags
+                ):
+                    item.tags.append("evolution_candidate")
+                rewarded += 1
+            elif decay_unused:
+                item.relevance_boost = max(
+                    0.1, min(5.0, item.relevance_boost - penalty)
+                )
+                item.importance = max(0.1, item.importance * (1.0 - penalty * 0.2))
+                penalized += 1
+            else:
+                continue
+
+            item.updated_at = now
+            self.adapter.write(ref, serialize_context_item(item))
+
+        self._emit_audit(
+            action="record_utility",
+            scope=scope,
+            detail={
+                "retrieved": len(retrieved_ids),
+                "used": len(used),
+                "rewarded": rewarded,
+                "penalized": penalized,
+            },
+        )
+        return {"rewarded": rewarded, "penalized": penalized}
+
     def compact(
         self,
         *,
@@ -1745,6 +1831,8 @@ class ContextSeek:
             all_dream_items = list(report.consolidation.items)
             if report.divergence:
                 all_dream_items.extend(report.divergence.items)
+            if report.pitfall:
+                all_dream_items.extend(report.pitfall.items)
 
             for item in all_dream_items:
                 if self.embedder is not None:
@@ -1761,6 +1849,7 @@ class ContextSeek:
                 "divergence_items": len(report.divergence.items)
                 if report.divergence
                 else 0,
+                "pitfall_items": len(report.pitfall.items) if report.pitfall else 0,
                 "total": report.total_dream_items,
             },
         )

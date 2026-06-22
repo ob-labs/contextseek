@@ -73,12 +73,21 @@ class DivergenceResult:
 
 
 @dataclass
+class PitfallResult:
+    """Output of the failure-driven reflection phase."""
+
+    items: list[ContextItem] = field(default_factory=list)
+    failures_seen: int = 0
+
+
+@dataclass
 class DreamReport:
     """Combined output of a full dream cycle."""
 
     consolidation: ConsolidationResult
     divergence: DivergenceResult | None
     total_dream_items: int
+    pitfall: PitfallResult | None = None
     timestamp: datetime = field(default_factory=_utc_now)
 
 
@@ -394,6 +403,193 @@ class DivergenceEngine:
 
 
 # ═══════════════════════════════════════════
+# Pitfall Reflector (failure-driven reflection)
+# ═══════════════════════════════════════════
+
+_FAILURE_MARKERS = frozenset(
+    {
+        "failed",
+        "failure",
+        "error",
+        "exception",
+        "timeout",
+        "incorrect",
+        "crash",
+        "traceback",
+        "失败",
+        "错误",
+        "报错",
+        "异常",
+        "超时",
+    }
+)
+_FAILURE_TAGS = frozenset({"failure", "failed", "error", "pitfall_source"})
+
+
+def _is_failure_trace(item: ContextItem) -> bool:
+    """Detect a failed execution trace worth reflecting on.
+
+    Dict traces are inspected for explicit failure fields; for every item the
+    tags are checked. Plain-text items only qualify via tags so that an ordinary
+    note mentioning the word "error" does not get mistaken for a failure.
+    """
+    if set(item.tags) & _FAILURE_TAGS:
+        return True
+    content = item.content
+    if isinstance(content, dict):
+        if content.get("success") is False or content.get("ok") is False:
+            return True
+        if str(content.get("status", "")).lower() in {"failed", "error", "failure"}:
+            return True
+        if str(content.get("outcome", "")).lower() in {"failure", "fail", "error"}:
+            return True
+        if content.get("error"):
+            return True
+        feedback = str(content.get("feedback", "")).lower()
+        if feedback and any(m in feedback for m in _FAILURE_MARKERS):
+            return True
+    return False
+
+
+def _failure_signature(item: ContextItem) -> str:
+    """Text used for clustering failures and phrasing the avoidance rule."""
+    content = item.content
+    if isinstance(content, dict):
+        parts = []
+        if content.get("input"):
+            parts.append(f"task: {content['input']}")
+        if content.get("error"):
+            parts.append(f"error: {content['error']}")
+        if content.get("output"):
+            parts.append(f"output: {content['output']}")
+        if content.get("feedback"):
+            parts.append(f"feedback: {content['feedback']}")
+        if parts:
+            return " | ".join(str(p) for p in parts)
+    return item.content_text
+
+
+class PitfallReflector:
+    """Distils "avoid this" rules from clusters of failed traces.
+
+    Failures that share a cause (token/embedding similarity) are grouped, and
+    each group yields one low-confidence pitfall item. Like dream output, a
+    pitfall decays unless reinforced (use it or lose it) — but once it earns
+    enough access it can ride the normal evolution pipeline up to a skill.
+    """
+
+    def __init__(
+        self,
+        *,
+        strategy: DreamStrategy,
+        embedder: Callable[[str], list[float]] | None = None,
+        llm: Callable[[str], str] | None = None,
+        cluster_similarity: float = 0.3,
+    ) -> None:
+        self._strategy = strategy
+        self._embedder = embedder
+        self._llm = llm
+        self._cluster_sim = cluster_similarity
+
+    def reflect(self, items: list[ContextItem]) -> PitfallResult:
+        failures = [
+            it
+            for it in items
+            if not it.is_deleted and it.searchable and _is_failure_trace(it)
+        ]
+        if len(failures) < self._strategy.pitfall_min_failures:
+            return PitfallResult(failures_seen=len(failures))
+
+        clusters = self._cluster(failures)
+        # Largest (most recurrent) failures first.
+        clusters.sort(key=len, reverse=True)
+        result = PitfallResult(failures_seen=len(failures))
+        for cluster in clusters[: self._strategy.pitfall_max_outputs]:
+            result.items.append(self._make_pitfall(cluster))
+        return result
+
+    def _cluster(self, failures: list[ContextItem]) -> list[list[ContextItem]]:
+        clusters: list[list[ContextItem]] = []
+        used: set[str] = set()
+        for i, a in enumerate(failures):
+            if a.id in used:
+                continue
+            cluster = [a]
+            used.add(a.id)
+            for b in failures[i + 1 :]:
+                if b.id in used:
+                    continue
+                if self._similarity(a, b) >= self._cluster_sim:
+                    cluster.append(b)
+                    used.add(b.id)
+            clusters.append(cluster)
+        return clusters
+
+    def _similarity(self, a: ContextItem, b: ContextItem) -> float:
+        if a.embedding and b.embedding:
+            return _cosine_similarity(a.embedding, b.embedding)
+        if self._embedder:
+            ea = self._embedder(_failure_signature(a))
+            eb = self._embedder(_failure_signature(b))
+            if ea and eb:
+                return _cosine_similarity(ea, eb)
+        return _token_similarity(_failure_signature(a), _failure_signature(b))
+
+    def _make_pitfall(self, cluster: list[ContextItem]) -> ContextItem:
+        signatures = [_failure_signature(it) for it in cluster]
+        rule_text = ""
+        if self._llm is not None:
+            prompt = (
+                "The following agent execution attempts all FAILED. Identify the "
+                "common cause and write a single concise 'avoid this' rule (one "
+                "sentence) that would prevent the failure next time.\n\n"
+                + "\n".join(f"- {s}" for s in signatures[:8])
+                + "\n\nAvoidance rule:"
+            )
+            try:
+                rule_text = self._llm(prompt).strip()
+            except Exception:
+                rule_text = ""
+
+        if not rule_text:
+            shared = _tokenize(signatures[0])
+            for s in signatures[1:]:
+                shared = shared & _tokenize(s)
+            shared.discard("")
+            focus = " ".join(sorted(shared)[:6]) if shared else "this operation"
+            rule_text = (
+                f"Pitfall: avoid the failure pattern around [{focus}] "
+                f"(seen in {len(cluster)} failed attempts)."
+            )
+
+        common_tags = set(cluster[0].tags)
+        for it in cluster[1:]:
+            common_tags &= set(it.tags)
+        carried = sorted(common_tags - _FAILURE_TAGS - {"auto_extracted"})
+
+        return ContextItem(
+            id=_generate_id(),
+            content=rule_text,
+            abstract=rule_text,
+            scope=cluster[0].scope,
+            provenance=Provenance(
+                source_type=SourceType.pitfall_reflection,
+                source_id=cluster[0].id,
+                confidence=self._strategy.pitfall_initial_confidence,
+                context=f"Reflected from {len(cluster)} failed traces",
+            ),
+            stage=Stage.extracted,
+            stability=Stability.transient,
+            tags=["pitfall", "avoid"] + carried,
+            links=[
+                Link(target_id=it.id, relation=LinkType.synthesized_from, strength=0.5)
+                for it in cluster
+            ],
+            importance=0.6,
+        )
+
+
+# ═══════════════════════════════════════════
 # Dream Engine (orchestrator)
 # ═══════════════════════════════════════════
 
@@ -425,6 +621,11 @@ class DreamEngine:
             strategy=self._strategy,
             llm=llm,
             prompt_templates=prompt_templates,
+        )
+        self._pitfall = PitfallReflector(
+            strategy=self._strategy,
+            embedder=embedder,
+            llm=llm,
         )
         self._last_dream_time: datetime | None = None
 
@@ -469,7 +670,11 @@ class DreamEngine:
                 )
 
         # Check minimum items threshold
-        active_items = [it for it in items if not it.is_deleted and it.searchable]
+        active_items = [
+            it
+            for it in items
+            if not it.is_deleted and it.searchable and it.is_valid_at()
+        ]
         if len(active_items) < self._strategy.min_items_for_dream:
             return DreamReport(
                 consolidation=ConsolidationResult(),
@@ -502,8 +707,15 @@ class DreamEngine:
             if len(clusters) >= self._strategy.divergence_min_clusters:
                 divergence_result = self._divergence.diverge(clusters)
 
-        total = len(consolidation_result.items) + (
-            len(divergence_result.items) if divergence_result else 0
+        # Phase 3: Pitfall reflection (learn from failures)
+        pitfall_result: PitfallResult | None = None
+        if self._strategy.pitfall_reflection_enabled:
+            pitfall_result = self._pitfall.reflect(active_items)
+
+        total = (
+            len(consolidation_result.items)
+            + (len(divergence_result.items) if divergence_result else 0)
+            + (len(pitfall_result.items) if pitfall_result else 0)
         )
 
         self._last_dream_time = now
@@ -511,6 +723,7 @@ class DreamEngine:
         return DreamReport(
             consolidation=consolidation_result,
             divergence=divergence_result,
+            pitfall=pitfall_result,
             total_dream_items=total,
         )
 
@@ -593,7 +806,9 @@ def pick_dream_targets(
         DreamTargets with populated consolidation_pairs and divergence_candidates.
     """
     targets = DreamTargets()
-    active = [it for it in items if not it.is_deleted and it.searchable]
+    active = [
+        it for it in items if not it.is_deleted and it.searchable and it.is_valid_at()
+    ]
 
     # ── Consolidation: pick from lint hints when available ───────────────────
     if consolidation_hints:
@@ -653,5 +868,7 @@ __all__ = [
     "DreamEngine",
     "DreamReport",
     "DreamTargets",
+    "PitfallReflector",
+    "PitfallResult",
     "pick_dream_targets",
 ]

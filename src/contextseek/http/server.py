@@ -44,6 +44,7 @@ class RetrieveRequest(BaseModel):
     full: bool = False
     filters: dict[str, Any] | None = None
     include_deleted: bool = False
+    include_expired: bool = False
 
 
 class ExpandRequest(BaseModel):
@@ -380,6 +381,7 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
             full=req.full,
             filters=req.filters,
             include_deleted=req.include_deleted,
+            include_expired=req.include_expired,
         )
         return {
             "items": [
@@ -444,6 +446,8 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
             "merged": report.merged_count,
             "archived": report.archived_count,
             "evolved": report.evolved_count,
+            "conflict_updated": report.conflict_updated_count,
+            "conflict_drift": report.conflict_drift_count,
         }
 
     @app.post("/dream")
@@ -456,6 +460,7 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
             "divergence_items": len(report.divergence.items)
             if report.divergence
             else 0,
+            "pitfall_items": len(report.pitfall.items) if report.pitfall else 0,
         }
 
     @app.post("/feedback")

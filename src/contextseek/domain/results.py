@@ -80,6 +80,12 @@ class CompactReport:
     evolved_count: int = 0
     """Number of items promoted along the evolution path."""
 
+    conflict_updated_count: int = 0
+    """Established facts retired (validity window closed) by a newer update."""
+
+    conflict_drift_count: int = 0
+    """Incoming items quarantined as drift against higher-authority facts."""
+
     details: dict = field(default_factory=dict)
 
 

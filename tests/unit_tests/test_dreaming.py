@@ -412,6 +412,23 @@ class TestDreamEngine:
         report = engine.dream([normal, deleted])
         assert report.total_dream_items == 0
 
+    def test_dream_with_expired_items_excluded(self):
+        """Expired (valid_to closed) items are excluded from dream input."""
+        strategy = DreamStrategy(
+            min_items_for_dream=2,
+            cooldown_hours=0.0,
+            consolidation_min_access=1,
+        )
+        engine = DreamEngine(strategy=strategy)
+
+        normal = _make_item(content="active item with content")
+        expired = _make_item(content="expired item")
+        expired.close_validity(reason="superseded")
+
+        # Only 1 currently-valid item — below min_items_for_dream=2.
+        report = engine.dream([normal, expired])
+        assert report.total_dream_items == 0
+
 
 # ═══════════════════════════════════════════
 # Decay integration

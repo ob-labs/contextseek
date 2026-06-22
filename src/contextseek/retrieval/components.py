@@ -226,6 +226,17 @@ class HeuristicReranker:
             feedback_score = float(item.get("feedback_score", 0.0))
         except (TypeError, ValueError):
             feedback_score = 0.0
+        # When no explicit feedback_score is carried, derive the interaction
+        # signal from relevance_boost (the persisted utility-feedback channel).
+        # boost defaults to 1.0 → signal 0.0 → channel stays inert, so items that
+        # were never used keep ranking on recall/overlap alone. Positive feedback
+        # (boost > 1) lifts the item; negative feedback (boost < 1) suppresses it.
+        if feedback_score == 0.0:
+            try:
+                boost = float(item.get("relevance_boost", 1.0))
+            except (TypeError, ValueError):
+                boost = 1.0
+            feedback_score = boost - 1.0
         # Exclude the feedback channel when there is no interaction signal.
         # sigmoid(0) = 0.5 would apply a uniform positive bias to every item
         # that has never been interacted with; zeroing the weight removes the

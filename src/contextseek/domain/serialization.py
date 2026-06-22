@@ -42,6 +42,11 @@ def serialize_context_item(item: ContextItem) -> dict[str, Any]:
         payload["last_accessed_at"] = _dt_to_str(item.last_accessed_at)
     if item.superseded_by:
         payload["superseded_by"] = item.superseded_by
+    if item.valid_from:
+        payload["valid_from"] = _dt_to_str(item.valid_from)
+    if item.valid_to:
+        payload["valid_to"] = _dt_to_str(item.valid_to)
+        payload["invalidated_reason"] = item.invalidated_reason
     if item.effective_confidence is not None:
         payload["effective_confidence"] = item.effective_confidence
     if item.deleted_at:
@@ -85,6 +90,11 @@ def deserialize_context_item(payload: dict[str, Any]) -> ContextItem:
         if payload.get("deleted_at")
         else None,
         deleted_reason=payload.get("deleted_reason"),
+        valid_from=_str_to_dt(payload["valid_from"])
+        if payload.get("valid_from")
+        else None,
+        valid_to=_str_to_dt(payload["valid_to"]) if payload.get("valid_to") else None,
+        invalidated_reason=payload.get("invalidated_reason"),
     )
     return item
 
