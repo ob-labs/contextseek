@@ -173,6 +173,7 @@ _API_ROOT_SEGMENTS: set[str] = {
     "scopes",
     "config",
     "metrics",
+    "plugins",
     "seed",
     "health",
     "install",
@@ -366,6 +367,10 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
     )
 
     ctx = client or ContextSeek.from_settings()
+
+    from contextseek.plugs.core.proxy.http import create_plug_proxy_router
+
+    app.include_router(create_plug_proxy_router(ctx))
 
     @app.post("/add")
     async def add_item(req: AddRequest) -> dict[str, Any]:

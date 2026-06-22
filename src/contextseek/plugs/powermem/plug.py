@@ -1,4 +1,4 @@
-"""PowerMem DataPlug — imports PowerMem memory entries into ContextSeek.
+"""PowerMem DataPlug.
 
 PowerMem is a memory system that stores structured memories with embeddings.
 This plug streams PowerMem entries as RawEvents, preserving their metadata
@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-from contextseek.protocols.plugs import PlugMeta, RawEvent
+from contextseek.plugs.core.protocols import PlugMeta, RawEvent
 
 
 @dataclass

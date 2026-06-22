@@ -1,6 +1,6 @@
 # Installation
 
-ContextSeek requires **Python 3.11, 3.12, or 3.13**. The core wheel includes the SDK, CLI, and MCP entry points. No API keys are required for the default in-memory backend.
+ContextSeek requires **Python 3.11, 3.12, or 3.13**. The core wheel includes the SDK, CLI, and MCP entry points. No API keys are required for the default SQLite backend.
 
 ## System requirements
 
@@ -8,7 +8,7 @@ ContextSeek requires **Python 3.11, 3.12, or 3.13**. The core wheel includes the
 |-----------|-------------|
 | Python | ≥ 3.11 |
 | OS | Linux, macOS, Windows (WSL recommended for production paths) |
-| Disk | Negligible for `memory`; plan space under `STORAGE_PATH` for `file` |
+| Disk | Default SQLite uses `SQLITE_PATH`; plan space under `STORAGE_PATH` for `file` |
 | Network | Only if using remote embedding/LLM APIs or OceanBase |
 
 ## Install from PyPI

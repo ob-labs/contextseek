@@ -26,7 +26,7 @@ Agent orchestration stays in your harness; import **documents, memories, traces,
 
 ```python
 from collections.abc import Iterator
-from contextseek.protocols.plugs import DataPlug, PlugMeta, RawEvent
+from contextseek.plugs.core.protocols import DataPlug, PlugMeta, RawEvent
 
 class MyWikiPlug:
     def metadata(self) -> PlugMeta:

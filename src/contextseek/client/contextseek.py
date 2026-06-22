@@ -13,18 +13,19 @@ from __future__ import annotations
 
 import json
 import warnings
+import hashlib
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Callable, Iterator
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 if TYPE_CHECKING:
     from contextseek.scope import ScopeStats, ScopeTree
 
 from contextseek.storage.protocol import SeekVFSAdapter
-from contextseek.protocols.plugs import DataPlug, PlugMeta
+from contextseek.plugs.core.protocols import DataPlug, PlugMeta
 from contextseek.domain.context_item import ContextItem
 from contextseek.domain.conflicts import ConflictType
 from contextseek.domain.inference import (
@@ -485,53 +486,20 @@ class ContextSeek:
         Raises:
             ValueError: If an exact duplicate already exists in the scope.
         """
-        # Normalize SourceType enum members to plain strings early so all
-        # downstream code (security checks, provenance, LLM prompts) sees str.
-        if isinstance(source_type, SourceType):
-            source_type = source_type.value
-
-        if self._scope_lint:
-            from contextseek.scope import ScopeLintWarning, _lint_scope
-
-            for msg in _lint_scope(scope):
-                warnings.warn(msg, ScopeLintWarning, stacklevel=2)
-
-        if self.strategy is not None:
-            from contextseek.security.policy import apply_write_policy, source_allowed
-
-            source_payload = {
-                "source": source,
-                "source_type": source_type,
-                "scope": scope,
-            }
-            if not source_allowed(source_payload, strategy=self.strategy.write):
-                msg = f"source not allowed: {source}"
-                raise ValueError(msg)
-            content = apply_write_policy(content, strategy=self.strategy.write)
-
-        # Build provenance
-        provenance = build_provenance(source, source_type, confidence)
-
-        # Infer stage if not provided
-        resolved_stage = stage
-        if resolved_stage is None:
-            if self._llm_stage_infer_enabled and self.llm is not None:
-                resolved_stage = infer_stage_with_classifier(
-                    source_type,
-                    content,
-                    classify_fn=self._classify_stage_with_llm,
-                )
-            else:
-                resolved_stage = infer_stage(source_type, content)
-
-        # Infer stability if not provided
-        resolved_stability = (
-            stability
-            if stability is not None
-            else infer_stability(resolved_stage, source_type)
+        source_type = self._normalize_source_type(source_type)
+        content = self._apply_write_policy(
+            content,
+            scope=scope,
+            source=source,
+            source_type=source_type,
         )
-
-        # Create the item
+        provenance = self._build_provenance(source, source_type, confidence)
+        resolved_stage, resolved_stability = self._resolve_stage_stability(
+            stage=stage,
+            stability=stability,
+            content=content,
+            source_type=source_type,
+        )
         item = ContextItem(
             content=content,
             scope=scope,
@@ -541,118 +509,11 @@ class ContextSeek:
             stability=resolved_stability,
             links=links or [],
         )
-
-        # Step 1 (early): generate L2 abstract + L1 summary so the embedder has
-        # a tight surface to work with. Step 2 (early): embed the abstract /
-        # content. Both run before conflict detection so we can use the
-        # embedding to ANN-narrow the candidate set instead of full-scanning.
-        if self.summarizer is not None:
-            item.abstract = self.summarizer.abstract(item.content_text)
-            item.summary = self.summarizer.summary(item.content_text)
-
-        if self.embedder is not None:
-            embed_source = item.abstract or item.content_text
-            item.embedding = self.embedder(embed_source)
-
-        # Write-time conflict detection
-        if check_conflicts:
-            from contextseek.domain.conflicts import ConflictType, detect_conflicts
-
-            # Fast-path: exact-duplicate via backend hash index.
-            # Match the legacy detect_conflicts behaviour, which skips items
-            # whose ``is_deleted`` is True — re-adding the same content into a
-            # scope where the prior copy was soft-deleted must succeed.
-            existing_ref = None
-            find_by_hash = getattr(self.adapter, "find_by_hash", None)
-            if find_by_hash is not None:
-                try:
-                    existing_ref = find_by_hash(
-                        self.resolver.prefix_for(scope), item.hash
-                    )
-                except Exception:  # noqa: BLE001  # backend errors must not block writes
-                    existing_ref = None
-            if existing_ref:
-                existing_item = self._read_item(existing_ref)
-                if existing_item is not None and not existing_item.is_deleted:
-                    # Policy: exact duplicate → return the existing item
-                    # idempotently instead of failing the call.  The write is
-                    # skipped; no new row is created.  Callers can detect the
-                    # dedup by comparing the returned item.id with the id they
-                    # would have expected for a fresh write.
-                    return existing_item
-                # Soft-deleted (or unreadable) → fall through to candidate-based
-                # detection so a revival writes a fresh row instead of failing.
-
-            # Narrow candidate set for near-duplicate / contradiction checks.
-            # When an embedding is available, use ANN recall (top-K) instead of
-            # listing the entire scope; falls back to a full scan only when the
-            # adapter cannot search by embedding.
-            candidates: list[ContextItem] = self._candidates_for_conflict_check(
-                item, scope
-            )
-            result = detect_conflicts(
-                item,
-                candidates,
-                llm_judge=(
-                    self._llm_conflict_judge
-                    if self._llm_conflict_check_enabled and self.llm is not None
-                    else None
-                ),
-            )
-
-            if result.has_duplicates:
-                dup = next(
-                    c
-                    for c in result.conflicts
-                    if c.conflict_type == ConflictType.duplicate
-                )
-                # Policy: exact duplicate → return the existing item
-                # idempotently.  Prefer the structured conflict result over
-                # the hard-coded ValueError so callers and policies can
-                # inspect the result rather than being forced to catch.
-                dup_ref = self.resolver.ref_for(scope, dup.existing_item_id)
-                dup_item = self._read_item(dup_ref)
-                if dup_item is not None:
-                    return dup_item
-                # Existing item unreadable (race / corruption) — fall through
-                # and write the new item so the content is not silently lost.
-
-            # Tag near-duplicates and contradictions for visibility
-            if result.has_conflicts:
-                if any(
-                    c.conflict_type == ConflictType.contradiction
-                    for c in result.conflicts
-                ):
-                    item.tags.append("has_contradiction")
-                if any(
-                    c.conflict_type == ConflictType.near_duplicate
-                    for c in result.conflicts
-                ):
-                    item.tags.append("near_duplicate")
-                # Auto-add refuted_by links for contradictions
-                for c in result.conflicts:
-                    if c.conflict_type == ConflictType.contradiction:
-                        item.links.append(
-                            Link(
-                                target_id=c.existing_item_id,
-                                relation=LinkType.refuted_by,
-                                strength=c.similarity,
-                            )
-                        )
-
-        # Serialize and persist
-        payload = serialize_context_item(item)
-        ref = self.resolver.ref_for(scope, item.id)
-        self.adapter.write(ref, payload)
-
-        # Audit
-        self._emit_audit(
-            action="add",
-            scope=scope,
-            detail={"ref": ref, "item_id": item.id, "stage": resolved_stage.value},
-        )
-
-        return item
+        prepared = self._prepare_item(item, check_conflicts=check_conflicts)
+        if prepared is not item:
+            return prepared
+        self._write_item_with_audit(prepared, action="add")
+        return prepared
 
     def retrieve(
         self,
@@ -2305,6 +2166,209 @@ class ContextSeek:
             return result
 
         return _call
+
+    @staticmethod
+    def _normalize_source_type(source_type: str | SourceType) -> str:
+        """Normalize SourceType enum members to plain strings."""
+        if isinstance(source_type, SourceType):
+            return source_type.value
+        return str(source_type)
+
+    @staticmethod
+    def _content_hash(content: str | dict[str, Any]) -> str:
+        raw = str(content) if isinstance(content, dict) else content
+        return hashlib.sha256(raw.encode()).hexdigest()
+
+    def _apply_write_policy(
+        self,
+        content: str | dict[str, Any],
+        *,
+        scope: str,
+        source: str,
+        source_type: str,
+    ) -> str | dict[str, Any]:
+        """Apply scope lint and configured write policy."""
+        if self._scope_lint:
+            from contextseek.scope import ScopeLintWarning, _lint_scope
+
+            for msg in _lint_scope(scope):
+                warnings.warn(msg, ScopeLintWarning, stacklevel=2)
+
+        if self.strategy is None:
+            return content
+
+        from contextseek.security.policy import apply_write_policy, source_allowed
+
+        source_payload = {
+            "source": source,
+            "source_type": source_type,
+            "scope": scope,
+        }
+        if not source_allowed(source_payload, strategy=self.strategy.write):
+            msg = f"source not allowed: {source}"
+            raise ValueError(msg)
+        return apply_write_policy(content, strategy=self.strategy.write)
+
+    def _build_provenance(
+        self,
+        source: str,
+        source_type: str,
+        confidence: float | None,
+        *,
+        context: str | None = None,
+    ):
+        """Build provenance for a write path."""
+        return build_provenance(source, source_type, confidence, context=context)
+
+    def _resolve_stage_stability(
+        self,
+        *,
+        stage: Stage | None,
+        stability: Stability | None,
+        content: str | dict[str, Any],
+        source_type: str,
+    ) -> tuple[Stage, Stability]:
+        """Resolve stage and stability using the same policy as public add()."""
+        resolved_stage = stage
+        if resolved_stage is None:
+            if self._llm_stage_infer_enabled and self.llm is not None:
+                resolved_stage = infer_stage_with_classifier(
+                    source_type,
+                    content,
+                    classify_fn=self._classify_stage_with_llm,
+                )
+            else:
+                resolved_stage = infer_stage(source_type, content)
+
+        resolved_stability = (
+            stability
+            if stability is not None
+            else infer_stability(resolved_stage, source_type)
+        )
+        return resolved_stage, resolved_stability
+
+    def _prepare_item(
+        self,
+        item: ContextItem,
+        *,
+        check_conflicts: bool,
+    ) -> ContextItem:
+        """Populate summaries/embeddings and optionally run conflict detection."""
+        if self.summarizer is not None:
+            item.abstract = self.summarizer.abstract(item.content_text)
+            item.summary = self.summarizer.summary(item.content_text)
+
+        if self.embedder is not None:
+            embed_source = item.abstract or item.content_text
+            item.embedding = self.embedder(embed_source)
+
+        if not check_conflicts:
+            return item
+
+        from contextseek.domain.conflicts import detect_conflicts
+
+        existing_ref = None
+        find_by_hash = getattr(self.adapter, "find_by_hash", None)
+        if find_by_hash is not None:
+            try:
+                existing_ref = find_by_hash(
+                    self.resolver.prefix_for(item.scope), item.hash
+                )
+            except Exception:  # noqa: BLE001
+                existing_ref = None
+        if existing_ref:
+            existing_item = self._read_item(existing_ref)
+            if existing_item is not None and not existing_item.is_deleted:
+                return existing_item
+
+        candidates: list[ContextItem] = self._candidates_for_conflict_check(
+            item, item.scope
+        )
+        result = detect_conflicts(
+            item,
+            candidates,
+            llm_judge=(
+                self._llm_conflict_judge
+                if self._llm_conflict_check_enabled and self.llm is not None
+                else None
+            ),
+        )
+
+        if result.has_duplicates:
+            dup = next(
+                c
+                for c in result.conflicts
+                if c.conflict_type == ConflictType.duplicate
+            )
+            dup_ref = self.resolver.ref_for(item.scope, dup.existing_item_id)
+            dup_item = self._read_item(dup_ref)
+            if dup_item is not None:
+                return dup_item
+
+        if result.has_conflicts:
+            if any(
+                c.conflict_type == ConflictType.contradiction
+                for c in result.conflicts
+            ):
+                item.tags.append("has_contradiction")
+            if any(
+                c.conflict_type == ConflictType.near_duplicate
+                for c in result.conflicts
+            ):
+                item.tags.append("near_duplicate")
+            for c in result.conflicts:
+                if c.conflict_type == ConflictType.contradiction:
+                    item.links.append(
+                        Link(
+                            target_id=c.existing_item_id,
+                            relation=LinkType.refuted_by,
+                            strength=c.similarity,
+                        )
+                    )
+
+        return item
+
+    def _write_item_with_audit(
+        self,
+        item: ContextItem,
+        *,
+        action: str,
+        detail: dict[str, Any] | None = None,
+    ) -> str:
+        """Write a ContextItem and emit an audit record."""
+        ref = self._write_item(item)
+        audit_detail = {"ref": ref, "item_id": item.id, "stage": item.stage.value}
+        if detail:
+            audit_detail.update(detail)
+        self._emit_audit(action=action, scope=item.scope, detail=audit_detail)
+        return ref
+
+    def _upsert_item(
+        self,
+        item: ContextItem,
+        *,
+        materialization_key: str,
+        audit_action: str = "plug_materialize",
+    ) -> str:
+        """Write a ContextItem using a deterministic materialization identity."""
+        item.id = uuid5(
+            NAMESPACE_URL,
+            f"contextseek:plug-materialization:{materialization_key}",
+        ).hex
+        item.content = self._apply_write_policy(
+            item.content,
+            scope=item.scope,
+            source=item.provenance.source_id,
+            source_type=item.provenance.source_type,
+        )
+        item.hash = self._content_hash(item.content)
+        self._prepare_item(item, check_conflicts=False)
+        self._write_item_with_audit(
+            item,
+            action=audit_action,
+            detail={"materialization_key": materialization_key},
+        )
+        return item.id
 
     def _emit_audit(
         self,

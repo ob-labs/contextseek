@@ -26,7 +26,7 @@ Agent 编排留在 Harness；**文档、记忆、轨迹、技能**用 plug 或 `
 
 ```python
 from collections.abc import Iterator
-from contextseek.protocols.plugs import DataPlug, PlugMeta, RawEvent
+from contextseek.plugs.core.protocols import DataPlug, PlugMeta, RawEvent
 
 class MyWikiPlug:
     def metadata(self) -> PlugMeta:

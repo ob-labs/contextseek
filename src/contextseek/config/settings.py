@@ -10,9 +10,9 @@ config file resolved in priority order:
 4. ``python-dotenv`` search
 
 Environment keys are matched case-insensitively.  Zero-config defaults yield
-an in-memory store with keyword-only retrieval — no LLM or embedding model
-required.  Personal installs (after ``contextseek init``) default to the
-embedded seekdb backend.
+a local SQLite store with keyword-only retrieval — no LLM, native engine, or
+embedding model required.  Advanced users can opt into seekdb or OceanBase via
+``STORAGE_BACKEND``.
 
 Usage::
 
@@ -132,7 +132,7 @@ class StorageSettings(BaseSettings):
 
     model_config = nested_section_config("STORAGE_")
 
-    backend: str = "memory"
+    backend: str = "sqlite"
     """Backend type: "memory", "file", "sqlite", "seekdb", or "oceanbase".
     Desktop/personal installs default to "sqlite" (cross-platform, no native deps)."""
 
@@ -431,7 +431,7 @@ class ContextSeekSettings(BaseSettings):
     case-insensitive.  Each section reads the same resolved ``.env`` file
     (``_get_default_env_file``); passing ``_env_file`` only affects the root
     model, not section sub-settings.
-    Zero-config defaults yield an in-memory store with keyword-only retrieval.
+    Zero-config defaults yield a local SQLite store with keyword-only retrieval.
 
     Environment variable examples::
 

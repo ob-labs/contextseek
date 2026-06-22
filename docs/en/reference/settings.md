@@ -1,6 +1,6 @@
 # Settings Reference
 
-All settings are loaded from environment variables and an optional `.env` file. The zero-config default is an in-memory store with keyword-only retrieval — no API keys required.
+All settings are loaded from environment variables and an optional `.env` file. The zero-config default is a local SQLite store with keyword-only retrieval — no API keys required.
 
 Copy `.env.example` to `.env` and edit. See [Configuration](../getting-started/configuration.md) for resolution order and code-level construction.
 
@@ -10,8 +10,9 @@ Copy `.env.example` to `.env` and edit. See [Configuration](../getting-started/c
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STORAGE_BACKEND` | `memory` | Storage backend: `memory` or `file` |
+| `STORAGE_BACKEND` | `sqlite` | Storage backend: `sqlite`, `memory`, `file`, `seekdb`, or `oceanbase` |
 | `STORAGE_PATH` | `.contextseek/store` | Root directory when `backend=file` |
+| `SQLITE_PATH` | `~/.contextseek/contextseek.sqlite3` | SQLite file when `backend=sqlite` |
 | `STORAGE_URI_SCHEME` | `contextseek://` | URI scheme used for scope refs |
 | `STORAGE_COLD_BACKEND` | _(empty)_ | Optional cold-tier backend type; empty disables tiered storage |
 | `STORAGE_COLD_PATH` | `.contextseek/cold` | Root directory for cold-tier file backend |

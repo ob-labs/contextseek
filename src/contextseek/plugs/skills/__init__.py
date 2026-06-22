@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from contextseek.protocols.plugs import PlugMeta, RawEvent
+from contextseek.plugs.core.protocols import PlugMeta, RawEvent
 
 
 def _parse_skill_md(text: str) -> dict:

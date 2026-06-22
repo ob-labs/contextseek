@@ -336,6 +336,70 @@ def build_parser() -> argparse.ArgumentParser:
         help="detect format and count items without writing",
     )
 
+    plug_replay_parser = subparsers.add_parser(
+        "plug-outbox-replay", help="replay pending/failed PlugGateway outbox events"
+    )
+    plug_replay_parser.add_argument("--limit", type=int, default=100)
+    plug_replay_parser.add_argument("--max-retry", type=int, default=3)
+    plug_replay_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit machine-readable JSON instead of human-readable output",
+    )
+    plug_replay_dead_parser = subparsers.add_parser(
+        "plug-outbox-replay-dead", help="explicitly replay one dead PlugGateway event"
+    )
+    plug_replay_dead_parser.add_argument("event_id")
+    plug_replay_dead_parser.add_argument("--max-retry", type=int, default=3)
+    plug_replay_dead_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit machine-readable JSON instead of human-readable output",
+    )
+
+    plug_install_parser = subparsers.add_parser(
+        "plug-install",
+        help="install or check a plug capability linker",
+    )
+    plug_install_parser.add_argument(
+        "plug",
+        nargs="?",
+        default="powermem",
+        choices=["powermem"],
+    )
+    plug_install_parser.add_argument("--linker", default=None)
+    plug_install_parser.add_argument("--dry-run", action="store_true")
+    plug_install_parser.add_argument("--check", action="store_true")
+
+    plug_serve_parser = subparsers.add_parser(
+        "plug-serve",
+        help="serve a plug capability through ContextSeek",
+    )
+    plug_serve_parser.add_argument(
+        "plug",
+        nargs="?",
+        default="powermem",
+        choices=["powermem"],
+    )
+    plug_serve_parser.add_argument("--linker", default=None)
+    plug_serve_parser.add_argument("--host", default="127.0.0.1")
+    plug_serve_parser.add_argument("--port", type=int, default=2882)
+    plug_serve_parser.add_argument("--scope", default=None)
+    plug_serve_parser.add_argument("--powermem-host", default="127.0.0.1")
+    plug_serve_parser.add_argument("--powermem-port", type=int, default=8000)
+    plug_serve_parser.add_argument("--powermem-command", default=None)
+    plug_serve_parser.add_argument("--powermem-upstream-base-url", default=None)
+    plug_serve_parser.add_argument("--proxy-base-url", default=None)
+    plug_serve_parser.add_argument("--no-install", action="store_true")
+    plug_serve_parser.add_argument("--dry-run", action="store_true")
+    plug_serve_parser.add_argument("--log-level", default="info")
+    plug_serve_parser.add_argument(
+        "--powermem-startup-grace",
+        type=float,
+        default=0.5,
+        help=argparse.SUPPRESS,
+    )
+
     # desktop-server — single-process backend for the desktop app: serves the
     # API and the built dashboard SPA from one origin.
     desktop_parser = subparsers.add_parser(
@@ -370,10 +434,16 @@ def run_cli(
 
         return run_desktop_server(args)
 
+    if args.command == "plug-serve":
+        from contextseek.plugs.powermem.serve import run_powermem_serve
+
+        return run_powermem_serve(args)
+
     settings = ContextSeekSettings()
 
     # Local scaffolding/process-state commands should not open the storage
-    # backend. This keeps `contextseek init` usable before seekdb exists.
+    # backend. This keeps `contextseek init` usable before any local database
+    # file exists.
     if args.command == "init":
         from contextseek.daemon.init_cmd import run_init
         import pathlib
@@ -419,6 +489,28 @@ def run_cli(
                 _merged = sum(_e.get("merged_count", 0) for _e in _recent)
         render_daemon_status(daemon.status(), evolved=_evolved, merged=_merged)
         return 0
+
+    if args.command == "plug-install":
+        from contextseek.plugs.powermem import PowerMemAdapter
+
+        plug = PowerMemAdapter()
+        result = plug.install(
+            linker=args.linker,
+            dry_run=args.dry_run,
+            check=args.check,
+        )
+        print(
+            json.dumps(
+                {
+                    "changed": result.changed,
+                    "dry_run": result.dry_run,
+                    "actions": result.actions,
+                    "warnings": result.warnings,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return _plug_install_status(list(result.warnings))
 
     if client is None:
         with suppress_backend_noise():
@@ -635,6 +727,53 @@ def run_cli(
 
     if args.command == "metrics":
         print(ctx.audit_log.export_prometheus() if ctx.audit_log is not None else "")
+        return 0
+
+    if args.command == "plug-outbox-replay":
+        from contextseek.plugs.core.gateway import OutboxWorker, PlugGateway
+
+        worker = OutboxWorker(PlugGateway(ctx), max_retry=args.max_retry)
+        result = worker.run_once(limit=args.limit)
+        payload = {
+            "applied": [
+                {
+                    "event_id": receipt.event_id,
+                    "context_item_id": receipt.context_item_id,
+                    "status": receipt.status,
+                }
+                for receipt in result.applied
+            ],
+            "failed_event_ids": result.failed_event_ids,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(
+                "plug outbox replay: "
+                f"applied={len(result.applied)} "
+                f"failed={len(result.failed_event_ids)}"
+            )
+        return 0
+
+    if args.command == "plug-outbox-replay-dead":
+        from contextseek.plugs.core.gateway import PlugGateway
+
+        receipt = PlugGateway(ctx, max_retry=args.max_retry).replay_dead(
+            args.event_id,
+            max_retry=args.max_retry,
+        )
+        payload = {
+            "event_id": receipt.event_id,
+            "context_item_id": receipt.context_item_id,
+            "status": receipt.status,
+        }
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(
+                "plug outbox replay-dead: "
+                f"event_id={receipt.event_id} status={receipt.status}"
+            )
         return 0
 
     if args.command == "dream":
@@ -998,6 +1137,24 @@ def run_cli(
         return 0
 
     return 1
+
+
+def _plug_install_status(warnings: list[str]) -> int:
+    fatal_prefixes = (
+        "disabled linker",
+        "unknown linker",
+        "Claude Code CLI cannot be found",
+        "failed to install Claude Code plugin",
+        "failed to enable Claude Code plugin",
+        "Claude Code plugin",
+        "OpenClaw CLI cannot be found",
+        "failed to install OpenClaw plugin",
+        "failed to verify OpenClaw plugin",
+        "failed to install Python package",
+        "Python package install finished",
+        "PowerMem LLM_PROVIDER cannot be inferred",
+    )
+    return 1 if any(w.startswith(fatal_prefixes) for w in warnings) else 0
 
 
 def main() -> int:

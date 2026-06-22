@@ -21,13 +21,15 @@ _CONFIG_ENV_TEMPLATE = """\
 # Generated: {date}
 
 # --- Storage ---
-STORAGE_BACKEND=seekdb                    # embedded mode, no changes needed
-SEEKDB_PATH=~/.contextseek/seekdb.db
-# SEEKDB_HOST=127.0.0.1                  # uncomment to switch to seekdb server
+STORAGE_BACKEND=sqlite                   # local file, no native engine required
+SQLITE_PATH=~/.contextseek/contextseek.sqlite3
+# STORAGE_BACKEND=seekdb                 # optional: embedded seekdb
+# SEEKDB_PATH=~/.contextseek/seekdb.db
+# SEEKDB_HOST=127.0.0.1                  # optional: seekdb server
 # SEEKDB_PORT=2881
 # For seekdb server mode, set STORAGE_BACKEND=oceanbase instead.
 
-# --- Embedding (default: built-in all-MiniLM-L6-v2 via ONNX, no config needed) ---
+# --- Embedding (optional; default works without external embedding) ---
 # EMBEDDING_PROVIDER=langchain
 # EMBEDDING_CLASS_PATH=langchain_openai.OpenAIEmbeddings
 # EMBEDDING_MODEL=text-embedding-3-small

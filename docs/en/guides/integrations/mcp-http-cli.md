@@ -24,7 +24,7 @@ contextseek --help
 
 Assumes `.env` in cwd or repo root (see [Configuration](../../getting-started/configuration.md)).
 
-> For client-side / personal mode (`init`, `daemon`, `sync`, embedded seekdb) and the full command reference, see **[CLI (client-side)](../cli.md)**. Below is a quick cheat sheet only.
+> For client-side / personal mode (`init`, `daemon`, `sync`, default SQLite) and the full command reference, see **[CLI (client-side)](../cli.md)**. Below is a quick cheat sheet only.
 
 ### Commands
 

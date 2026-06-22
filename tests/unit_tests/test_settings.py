@@ -32,10 +32,11 @@ from contextseek.config.factory import (
 class TestContextSeekSettings:
     """Test settings model construction and defaults."""
 
-    def test_default_construction(self):
+    def test_default_construction(self, monkeypatch):
         """Zero-config construction succeeds with sensible defaults."""
+        monkeypatch.delenv("STORAGE_BACKEND", raising=False)
         settings = ContextSeekSettings()
-        assert settings.storage.backend == "memory"
+        assert settings.storage.backend == "sqlite"
         assert settings.embedding.provider == "none"
         assert settings.llm.provider == "none"
         assert settings.retrieval.default_k == 20

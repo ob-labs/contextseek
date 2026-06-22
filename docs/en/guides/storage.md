@@ -4,16 +4,37 @@ ContextSeek is storage-agnostic. Choose a backend based on your deployment stage
 
 ---
 
+## SQLiteBackend
+
+The default when no `STORAGE_BACKEND` is set. Data is stored in a local SQLite file with no external service or native engine required.
+
+**When to use:** personal client-side use, desktop installs, local agents, and stable persistence by default.
+
+```python
+from contextseek import ContextSeek
+
+ctx = ContextSeek.from_settings()  # SQLite by default
+```
+
+Or explicitly via settings:
+
+```env
+STORAGE_BACKEND=sqlite
+SQLITE_PATH=~/.contextseek/contextseek.sqlite3
+```
+
+---
+
 ## InMemoryBackend
 
-The default when no `STORAGE_BACKEND` is set. All data lives in a Python dict and is lost when the process exits.
+All data lives in a Python dict and is lost when the process exits.
 
 **When to use:** unit tests, quick prototyping, single-request pipelines where persistence is not needed.
 
 ```python
 from contextseek import ContextSeek
 
-ctx = ContextSeek()  # InMemory by default
+ctx = ContextSeek()
 ```
 
 Or explicitly via settings:

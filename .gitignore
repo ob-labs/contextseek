@@ -47,6 +47,8 @@ htmlcov/
 
 # Local tooling
 *.log
+.dev-logs/
+.dev-pids/
 .cursor/
 .claude/
 .githooks/
