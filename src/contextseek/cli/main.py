@@ -164,6 +164,9 @@ def build_parser() -> argparse.ArgumentParser:
     # metrics
     subparsers.add_parser("metrics", help="print prometheus metrics")
 
+    # doctor
+    subparsers.add_parser("doctor", help="check config and component connectivity")
+
     # dream
     dream_parser = subparsers.add_parser(
         "dream", help="trigger dream cycle (consolidation + divergence)"
@@ -369,6 +372,11 @@ def run_cli(
         from contextseek.cli.desktop import run_desktop_server
 
         return run_desktop_server(args)
+
+    if args.command == "doctor":
+        from contextseek.cli.doctor import run_doctor
+
+        return run_doctor()
 
     settings = ContextSeekSettings()
 
