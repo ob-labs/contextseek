@@ -15,6 +15,11 @@ class ContextSeekMCPServer:
 
     client: ContextSeek
 
+    @classmethod
+    def with_default_client(cls) -> "ContextSeekMCPServer":
+        """Create a server backed by the default ContextSeek settings."""
+        return cls(client=ContextSeek.from_settings())
+
     def list_tools(self) -> list[dict[str, Any]]:
         """Return MCP tool definitions."""
         return [

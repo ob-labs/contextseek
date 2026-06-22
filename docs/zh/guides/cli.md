@@ -171,20 +171,21 @@ sync 会跳过写入时的冲突检测以保证批量导入速度；导入后用
 
 ## 命令全表
 
-> 约定：除 `retrieve` / `overview` / `lint` 默认输出人类可读的富文本（可加 `--json` 切机器格式）、`sync` / `skill-export` 输出富文本面板外，其余命令均向 stdout 打印 **JSON**。
+> 约定：`retrieve` / `overview` / `lint` 默认输出人类可读的富文本（可加 `--json` 切机器格式），`sync` / `skill-export` 输出富文本面板。`daemon`、`desktop-server` 等服务 / 进程类命令输出状态日志；多数其它数据命令向 stdout 打印 **JSON**。
 
 ### 写入与检索
 
 | 命令 | 关键参数 | 说明 |
 |------|----------|------|
 | `add` | `--content`(必填) `--source` `--tags` | 写入一条上下文，返回 `{id, stage}` |
-| `retrieve` | `--query`(必填) `--k`(10) `--full` `--json` | 检索排序后的 SearchHit；默认 L1 摘要，`--full` 返回 L0 全文 |
+| `retrieve` | `--query`(必填) `--k`(10) `--full` `--json` `--tags` | 检索排序后的 SearchHit；默认 L1 摘要，`--full` 返回 L0 全文。`--tags a,b` 要求返回项同时包含列出的所有标签 |
 | `expand` | `--ids`(必填，逗号分隔) | 把已检索 id 升档到 L0 全文 |
 | `items` | `--stage`(raw/extracted/knowledge/skill) | 列举 scope 内全部 item |
 
 ```bash
 contextseek add --scope me/work --content "偏好简洁回答" --source cli --tags preference,language
 contextseek retrieve --scope me/work --query "语言偏好" --k 5
+contextseek retrieve --scope me/work --query "语言偏好" --tags preference,language
 contextseek retrieve --scope me/work --query "语言偏好" --k 3 --full
 contextseek expand --scope me/work --ids 1a2b3c,4d5e6f
 contextseek items --scope me/work --stage knowledge
@@ -250,12 +251,14 @@ contextseek skill-export --scope me/work --out ~/.contextseek/skills --dry-run
 
 ### 运维
 
-| 命令 | 说明 |
-|------|------|
-| `metrics` | 打印 Prometheus 文本格式指标 |
+| 命令 | 关键参数 | 说明 |
+|------|----------|------|
+| `metrics` | — | 打印 Prometheus 文本格式指标 |
+| `desktop-server` | `--host` `--port` `--data-dir` `--log-level` | 为桌面端运行同源后端：HTTP API 与已构建的 dashboard SPA |
 
 ```bash
 contextseek metrics
+contextseek desktop-server --host 127.0.0.1 --port 8000
 ```
 
 ---

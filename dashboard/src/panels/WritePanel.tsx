@@ -133,7 +133,7 @@ export function WritePanel() {
                 id="tags"
                 value={tags}
                 onChange={(e) => setTags(e.target.value)}
-                placeholder="note, draft"
+                placeholder={t("write.tagsPlaceholder")}
               />
             </div>
           </div>

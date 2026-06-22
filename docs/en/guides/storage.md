@@ -101,6 +101,24 @@ Writes always go to the hot tier. `compact()` moves archived items (ephemeral TT
 
 ---
 
+## Hash-based lookup
+
+Every serialized `ContextItem` carries a content hash. Storage adapters that
+can index that field expose `find_by_hash(prefix, hash_value)` as an optional
+fast path for exact lookups within a scope prefix.
+
+ContextSeek uses this lookup before full conflict detection when adding new
+items. If the same content already exists in the same scope, the write can
+return the existing item idempotently instead of scanning the whole scope or
+creating a duplicate. Import and sync flows can also reuse hashes to skip
+unchanged records across repeated runs.
+
+Backends that cannot provide an efficient hash index may omit the fast path;
+callers fall back to the normal scan/search behavior. Hash lookup is for exact
+content reuse and deduplication, not semantic similarity.
+
+---
+
 ## Choosing a backend
 
 | Scenario | Recommended backend |

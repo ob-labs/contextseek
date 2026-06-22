@@ -128,6 +128,10 @@ class TestLint:
         issues = _lint_scope("acme/my project")
         assert issues
 
+    def test_empty_segment_flagged(self):
+        issues = _lint_scope("acme//pay")
+        assert any("empty" in m or "repeated" in m for m in issues)
+
     def test_clean_scope_has_no_issues(self):
         assert _lint_scope("acme/payment-service/agent") == []
 

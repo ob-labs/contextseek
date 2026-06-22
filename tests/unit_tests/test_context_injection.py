@@ -38,6 +38,29 @@ class TestRetrieveResponse:
         for hit in response:
             assert hit.layer == "full"
 
+    def test_tags_filter_requires_all_tags(self):
+        ctx = ContextSeek()
+        kept = ctx.add(
+            "database backup runbook",
+            scope="t/p",
+            source="cli",
+            tags=["ops", "database"],
+        )
+        other = ctx.add(
+            "database onboarding guide",
+            scope="t/p",
+            source="cli",
+            tags=["docs", "database"],
+        )
+
+        tagged_response = ctx.retrieve(
+            "database", scope="t/p", tags=["ops", "database"]
+        )
+        unfiltered_response = ctx.retrieve("database", scope="t/p")
+
+        assert [hit.item.id for hit in tagged_response] == [kept.id]
+        assert {hit.item.id for hit in unfiltered_response} == {kept.id, other.id}
+
 
 class TestExpand:
     def test_expand_returns_full_items_without_scope(self):

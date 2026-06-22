@@ -29,6 +29,10 @@ def _lint_scope(scope: str) -> list[str]:
         issues.append(
             f"scope '{scope}' has no '/' separator; at least two levels recommended for isolation"
         )
+    if any(part == "" for part in scope.split("/")):
+        issues.append(
+            f"scope '{scope}' contains empty path segments; avoid repeated, leading, or trailing slashes"
+        )
     depth = len(scope.strip("/").split("/"))
     if depth > 6:
         issues.append(

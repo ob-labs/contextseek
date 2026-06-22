@@ -95,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="emit machine-readable JSON instead of human-readable output",
     )
     retrieve_parser.add_argument(
+        "--tags",
+        default="",
+        help="comma-separated tag filter; returned items must contain all tags",
+    )
+    retrieve_parser.add_argument(
         "--verbose",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -439,6 +444,7 @@ def run_cli(
         return 0
 
     if args.command == "retrieve":
+        tags = [t.strip() for t in args.tags.split(",") if t.strip()]
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             response = ctx.retrieve(
@@ -446,6 +452,7 @@ def run_cli(
                 scope=args.scope,
                 k=args.k,
                 full=args.full,
+                tags=tags or None,
             )
         output = {
             "items": [
@@ -476,10 +483,12 @@ def run_cli(
     if args.command == "expand":
         ids = [i.strip() for i in args.ids.split(",") if i.strip()]
         items: list = []
+        missing_ids: list[str] = []
         for iid in ids:
             ref = ctx.resolver.ref_for(args.scope, iid)
             payload = ctx.adapter.read(ref)
             if payload is None:
+                missing_ids.append(iid)
                 continue
             try:
                 items.append(deserialize_context_item(payload))
@@ -487,7 +496,10 @@ def run_cli(
                 continue
         print(
             json.dumps(
-                {"items": [serialize_context_item(it) for it in items]},
+                {
+                    "items": [serialize_context_item(it) for it in items],
+                    "missing_ids": missing_ids,
+                },
                 ensure_ascii=False,
             )
         )
