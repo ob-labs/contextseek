@@ -171,6 +171,27 @@ class TestScopeLintInCtx:
         assert not lint_warnings
 
 
+def test_list_scopes_reads_sqlite_scope_column(tmp_path):
+    from seekvfs import VFS
+
+    from contextseek.client.contextseek import ContextSeek
+    from contextseek.storage.sqlite_backend import SQLiteBackend
+    from contextseek.storage.storage_adapter import SeekVFSStorageAdapter
+
+    backend = SQLiteBackend(path=str(tmp_path / "ctx.sqlite3"))
+    backend.initialize()
+    vfs = VFS(
+        routes={"contextseek://": {"backend": backend}},
+        scheme="contextseek://",
+    )
+    ctx = ContextSeek(adapter=SeekVFSStorageAdapter(vfs))
+
+    ctx.add("user memory", scope="user", source="test")
+    ctx.add("project memory", scope="project/demo", source="test")
+
+    assert ctx.list_scopes() == ["project/demo", "user"]
+
+
 class TestScopeTreeAndStats:
     def _make_ctx(self):
         from contextseek.client.contextseek import ContextSeek

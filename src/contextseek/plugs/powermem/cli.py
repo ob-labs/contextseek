@@ -18,7 +18,10 @@ from contextseek.plugs.core.proxy.cli import (
     warning,
 )
 from contextseek.plugs.powermem.adapter import MEMORIES_PATH, PowerMemAdapter
-from contextseek.plugs.powermem.env import powermem_child_process_env
+from contextseek.plugs.powermem.env import (
+    powermem_child_process_cwd,
+    powermem_child_process_env,
+)
 from contextseek.plugs.core.protocols import PlugChangeEvent, PlugProxyRequest
 
 
@@ -118,7 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 126
 
-    result = run_cli([executable, *args], env=powermem_child_process_env())
+    result = run_cli(
+        [executable, *args],
+        env=powermem_child_process_env(),
+        cwd=powermem_child_process_cwd(),
+    )
     emit_cli_result(result)
     if result.returncode != 0:
         return result.returncode

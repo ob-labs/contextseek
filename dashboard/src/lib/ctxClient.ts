@@ -25,6 +25,12 @@ import type {
   ItemsRequest,
   ItemsResponse,
   Overview,
+  PlugCatalogResponse,
+  PlugInstallJobResponse,
+  PlugInstallRequest,
+  PlugJobResponse,
+  PlugStatusRefreshJobResponse,
+  PlugStatusResponse,
   RetrieveRequest,
   RetrieveResponse,
   SeedResponse,
@@ -45,6 +51,7 @@ import type {
 // separate-process development (front-end on a different port/host), set
 // VITE_CTX_BASE to the absolute backend URL at build time.
 const BASE = import.meta.env.VITE_CTX_BASE ?? "";
+const REQUEST_TIMEOUT_MS = Number(import.meta.env.VITE_CTX_TIMEOUT_MS ?? 30_000);
 
 type TauriInvoke = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 
@@ -75,8 +82,21 @@ async function parseError(res: Response): Promise<never> {
   throw new CtxError(res.status, body);
 }
 
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 async function post<T>(path: string, payload: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithTimeout(`${BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -87,13 +107,13 @@ async function post<T>(path: string, payload: unknown): Promise<T> {
 
 async function get<T>(path: string, query?: Record<string, string>): Promise<T> {
   const qs = query ? `?${new URLSearchParams(query).toString()}` : "";
-  const res = await fetch(`${BASE}${path}${qs}`);
+  const res = await fetchWithTimeout(`${BASE}${path}${qs}`);
   if (!res.ok) return parseError(res);
   return res.json() as Promise<T>;
 }
 
 async function put<T>(path: string, payload: unknown): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetchWithTimeout(`${BASE}${path}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
@@ -103,7 +123,7 @@ async function put<T>(path: string, payload: unknown): Promise<T> {
 }
 
 async function getText(path: string): Promise<string> {
-  const res = await fetch(`${BASE}${path}`);
+  const res = await fetchWithTimeout(`${BASE}${path}`);
   if (!res.ok) return parseError(res);
   return res.text();
 }
@@ -125,6 +145,13 @@ export const ctx = {
     get<GlobalOverview>("/global_overview", scope ? { scope } : undefined),
   scopes: () => get<{ scopes: string[] }>("/scopes"),
   config: () => get<Config>("/config"),
+  plugs: () => get<PlugCatalogResponse>("/plugs"),
+  plugStatus: (plug: string) => get<PlugStatusResponse>(`/plugs/${plug}`),
+  plugJob: (jobId: string) => get<PlugJobResponse>(`/plugs/jobs/${jobId}`),
+  plugStatusRefresh: (plug: string) =>
+    post<PlugStatusRefreshJobResponse>(`/plugs/${plug}/status/refresh`, {}),
+  plugInstall: (plug: string, req: PlugInstallRequest) =>
+    post<PlugInstallJobResponse>(`/plugs/${plug}/install`, req),
   updateConfig: (req: ConfigUpdateRequest) =>
     put<{ status: string; restart_required: boolean }>("/config", req),
   testConfig: (req: ConfigTestRequest) => post<ConfigTestResponse>("/config/test", req),

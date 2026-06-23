@@ -18,6 +18,7 @@ from contextseek.plugs.core.linkers import (
     LinkerResult,
     merge_linker_results,
 )
+from contextseek.plugs.powermem.adapter import DEFAULT_CONTEXTSEEK_SCOPE
 from contextseek.plugs.powermem.env import (
     ensure_managed_powermem_env,
     managed_powermem_env_path,
@@ -33,6 +34,22 @@ from contextseek.plugs.powermem.linkers.runtime import (
 
 
 _FALSE_VALUES = {"0", "false", "no", "off"}
+_DEFAULT_CONTEXTSEEK_SQLITE_PATH = "~/.contextseek/contextseek.sqlite3"
+_CONTEXTSEEK_STORAGE_ENV_KEYS = (
+    "STORAGE_BACKEND",
+    "STORAGE_PATH",
+    "SQLITE_PATH",
+    "SEEKDB_PATH",
+    "SEEKDB_HOST",
+    "SEEKDB_PORT",
+    "SEEKDB_DATABASE",
+    "OB_HOST",
+    "OB_PORT",
+    "OB_USER",
+    "OB_PASSWORD",
+    "OB_DB_NAME",
+    "OB_TABLE_NAME",
+)
 
 
 @dataclass(frozen=True)
@@ -89,6 +106,156 @@ class PowerMemMCPConfigLinker(LifecycleLinker):
             dry_run=False,
             actions=actions,
             warnings=env_result.warnings,
+        )
+
+
+@dataclass(frozen=True)
+class PowerMemClaudeCodeMCPConfigLinker(LifecycleLinker):
+    """Install a PowerMem MCP proxy server through the Claude Code CLI."""
+
+    name: str
+    target: str
+    config_env_var: str
+    default_config_path: Path
+    server_name: str = "powermem"
+    command_env_var: str = "CONTEXTSEEK_CLAUDE_CODE_COMMAND"
+    scope_env_var: str = "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_SCOPE"
+    timeout: float = 30.0
+
+    def install_runtime(
+        self,
+        *,
+        plug_name: str,
+        dry_run: bool = False,
+        check: bool = False,
+    ) -> LinkerResult:
+        return PowerMemMCPRuntimeInstaller().install(dry_run=dry_run, check=check)
+
+    def configure_proxy(
+        self,
+        *,
+        plug_name: str,
+        dry_run: bool = False,
+        check: bool = False,
+    ) -> LinkerResult:
+        explicit_config_path = os.environ.get(self.config_env_var, "").strip()
+        if explicit_config_path:
+            return PowerMemMCPConfigLinker(
+                name=self.name,
+                target=self.target,
+                config_env_var=self.config_env_var,
+                default_config_path=Path(explicit_config_path),
+                server_name=self.server_name,
+            ).configure_proxy(plug_name=plug_name, dry_run=dry_run, check=check)
+
+        env_result = ensure_managed_powermem_env(dry_run=dry_run, check=check)
+        command = _claude_code_command(self.command_env_var)
+        desired = _powermem_mcp_server_config()
+        scope = os.environ.get(self.scope_env_var, "user").strip() or "user"
+        actions = env_result.actions + [
+            f"register {self.target} MCP server via Claude Code CLI: {self.server_name}",
+            f"remove existing Claude Code MCP server if present: {self.server_name}",
+            f"run claude mcp add-json --scope {scope} {self.server_name}",
+            f"route {plug_name} MCP calls through ContextSeek PowerMem proxy",
+        ]
+        warnings = list(env_result.warnings)
+        if not _command_available(command):
+            warnings.append(
+                f"{self.target} CLI cannot be found; install {self.target} or set {self.command_env_var}",
+            )
+            return LinkerResult(
+                changed=False,
+                dry_run=dry_run or check,
+                actions=actions,
+                warnings=warnings,
+            )
+
+        if check:
+            verify = _run_command(
+                [*command, "mcp", "get", self.server_name],
+                timeout=self.timeout,
+            )
+            if verify.returncode == 0:
+                return LinkerResult(
+                    changed=env_result.changed,
+                    dry_run=True,
+                    actions=actions
+                    + [f"verified {self.target} MCP server: {self.server_name}"],
+                    warnings=warnings,
+                )
+            return LinkerResult(
+                changed=True,
+                dry_run=True,
+                actions=actions,
+                warnings=warnings,
+            )
+
+        if dry_run:
+            return LinkerResult(
+                changed=True,
+                dry_run=True,
+                actions=actions,
+                warnings=warnings,
+            )
+
+        _run_command(
+            [
+                *command,
+                "mcp",
+                "remove",
+                "--scope",
+                scope,
+                self.server_name,
+            ],
+            timeout=self.timeout,
+        )
+        result = _run_command(
+            [
+                *command,
+                "mcp",
+                "add-json",
+                "--scope",
+                scope,
+                self.server_name,
+                json.dumps(desired, ensure_ascii=False, sort_keys=True),
+            ],
+            timeout=self.timeout,
+        )
+        if result.returncode != 0:
+            warnings.append(
+                f"failed to register {self.target} MCP server {self.server_name}: "
+                + _short_command_output(result),
+            )
+            return LinkerResult(
+                changed=False,
+                dry_run=False,
+                actions=actions,
+                warnings=warnings,
+            )
+
+        legacy_result = _remove_legacy_claude_code_mcp_config(
+            self.default_config_path,
+            self.server_name,
+        )
+        actions.extend(legacy_result.actions)
+        warnings.extend(legacy_result.warnings)
+
+        verify = _run_command(
+            [*command, "mcp", "get", self.server_name],
+            timeout=self.timeout,
+        )
+        if verify.returncode != 0:
+            warnings.append(
+                f"failed to verify {self.target} MCP server {self.server_name}: "
+                + _short_command_output(verify),
+            )
+        else:
+            actions.append(f"verified {self.target} MCP server: {self.server_name}")
+        return LinkerResult(
+            changed=True,
+            dry_run=False,
+            actions=actions,
+            warnings=warnings,
         )
 
 
@@ -797,6 +964,41 @@ def _openclaw_command(env_var: str) -> list[str]:
     return shlex.split(raw)
 
 
+def _claude_code_command(env_var: str) -> list[str]:
+    raw = os.environ.get(env_var, "").strip() or "claude"
+    return shlex.split(raw)
+
+
+def _remove_legacy_claude_code_mcp_config(
+    default_config_path: Path,
+    server_name: str,
+) -> LinkerResult:
+    path = default_config_path.expanduser()
+    if not path.is_file():
+        return LinkerResult(changed=False, dry_run=False)
+    before = _read_json(path)
+    servers = dict(before.get("mcpServers") or {})
+    server = servers.get(server_name)
+    if not _is_contextseek_mcp_server(server):
+        return LinkerResult(changed=False, dry_run=False)
+    servers.pop(server_name, None)
+    after = dict(before)
+    after["mcpServers"] = servers
+    _write_json(path, after)
+    return LinkerResult(
+        changed=True,
+        dry_run=False,
+        actions=[f"remove legacy Claude Code MCP config entry: {path}#{server_name}"],
+    )
+
+
+def _is_contextseek_mcp_server(server: Any) -> bool:
+    if not isinstance(server, dict):
+        return False
+    command = str(server.get("command") or "")
+    return Path(command).name == "contextseek-pmem-mcp-stdio"
+
+
 def _command_available(command: list[str]) -> bool:
     if not command:
         return False
@@ -804,6 +1006,23 @@ def _command_available(command: list[str]) -> bool:
     if os.sep in executable:
         return Path(executable).expanduser().is_file()
     return shutil.which(executable) is not None
+
+
+def _run_command(command: list[str], *, timeout: float) -> _CommandResult:
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return _CommandResult(returncode=1, output=str(exc))
+    return _CommandResult(
+        returncode=completed.returncode,
+        output=(completed.stdout or "") + (completed.stderr or ""),
+    )
 
 
 def _plugin_list_contains(output: str, plugin_name: str) -> bool:
@@ -1448,6 +1667,10 @@ def _real_powermem_cli_command() -> str:
 def _powermem_cli_env_defaults(real_cli: str) -> dict[str, str]:
     defaults = {
         "CONTEXTSEEK_POWERMEM_ENV_FILE": str(managed_powermem_env_path()),
+        "CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE": os.environ.get(
+            "CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE",
+            DEFAULT_CONTEXTSEEK_SCOPE,
+        ),
     }
     if real_cli:
         defaults["CONTEXTSEEK_POWERMEM_CLI"] = real_cli
@@ -1477,8 +1700,8 @@ def _powermem_mcp_env() -> dict[str, str]:
     env: dict[str, str] = {
         "CONTEXTSEEK_POWERMEM_ENV_FILE": str(managed_powermem_env_path()),
     }
+    env.update(_contextseek_mcp_env())
     for key in (
-        "CONTEXTSEEK_CONFIG",
         "CONTEXTSEEK_POWERMEM_RUNTIME_DIR",
         "CONTEXTSEEK_POWERMEM_PACKAGE_INSTALL_STRATEGY",
         "CONTEXTSEEK_POWERMEM_MCP_BACKEND_COMMAND",
@@ -1486,9 +1709,29 @@ def _powermem_mcp_env() -> dict[str, str]:
         value = os.environ.get(key)
         if value:
             env[key] = value
-    default_scope = os.environ.get("CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE")
-    if default_scope:
-        env["CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE"] = default_scope
+    env["CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE"] = os.environ.get(
+        "CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE",
+        DEFAULT_CONTEXTSEEK_SCOPE,
+    )
+    return env
+
+
+def _contextseek_mcp_env() -> dict[str, str]:
+    contextseek_config = os.environ.get("CONTEXTSEEK_CONFIG", "").strip()
+    if contextseek_config:
+        return {"CONTEXTSEEK_CONFIG": contextseek_config}
+
+    env = {
+        key: value
+        for key in _CONTEXTSEEK_STORAGE_ENV_KEYS
+        if (value := os.environ.get(key, "").strip())
+    }
+    backend = env.get("STORAGE_BACKEND", "").lower()
+    if not backend:
+        env["STORAGE_BACKEND"] = "sqlite"
+        backend = "sqlite"
+    if backend == "sqlite" and not (env.get("SQLITE_PATH") or env.get("STORAGE_PATH")):
+        env["SQLITE_PATH"] = str(Path(_DEFAULT_CONTEXTSEEK_SQLITE_PATH).expanduser())
     return env
 
 

@@ -31,6 +31,7 @@ POWERMEM_PLUG_NAME = "powermem"
 POWERMEM_SOURCE_TYPE = "external_api"
 POWERMEM_TAG = "powermem"
 DEFAULT_INSTANCE_ID = "default"
+DEFAULT_CONTEXTSEEK_SCOPE = "contextseek"
 MEMORIES_PATH = "/api/v1/memories"
 MEMORIES_SEARCH_PATH = "/api/v1/memories/search"
 
@@ -340,13 +341,7 @@ class PowerMemAdapter:
             return str(body["scope"])
         if self.default_scope:
             return self.default_scope
-        user_id = body.get("user_id") or metadata.get("user_id")
-        agent_id = body.get("agent_id") or metadata.get("agent_id")
-        if user_id and agent_id:
-            return f"{POWERMEM_PLUG_NAME}/{agent_id}/{user_id}"
-        if user_id:
-            return f"{POWERMEM_PLUG_NAME}/{user_id}"
-        return f"{POWERMEM_PLUG_NAME}/{self.instance_id}"
+        return DEFAULT_CONTEXTSEEK_SCOPE
 
     @staticmethod
     def _stage_hint_from_request(body: dict[str, Any]) -> str:

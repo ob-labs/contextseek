@@ -1182,6 +1182,22 @@ class ContextSeek:
         except Exception:
             pass
 
+        # SQLite: dedicated scope column -> single SQL query
+        try:
+            from contextseek.storage.sqlite_backend import SQLiteBackend
+
+            if isinstance(raw_backend, SQLiteBackend):
+                with raw_backend._lock:
+                    rows = raw_backend._db.execute(
+                        "SELECT DISTINCT scope FROM context_items "
+                        "WHERE scope IS NOT NULL AND scope != '' "
+                        "ORDER BY scope"
+                    ).fetchall()
+                scopes = {str(row[0]) for row in rows if row[0]}
+                return sorted(scopes)
+        except Exception:
+            pass
+
         # seekdb: get all metadata in batches, extract distinct scope values
         try:
             from contextseek.storage.seekdb_backend import SeekDBBackend

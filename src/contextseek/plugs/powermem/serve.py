@@ -15,9 +15,11 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from contextseek.plugs.core.linkers import LinkerResult
+from contextseek.plugs.powermem.adapter import DEFAULT_CONTEXTSEEK_SCOPE
 from contextseek.plugs.powermem.env import (
     ensure_managed_powermem_env,
     managed_powermem_env_path,
+    powermem_child_process_cwd,
     powermem_child_process_env,
 )
 from contextseek.plugs.powermem.linkers.runtime import PowerMemHTTPRuntimeInstaller
@@ -188,11 +190,7 @@ def _base_url_for_host(host: str, port: int, *, path: str = "") -> str:
 def _default_scope(scope: str | None, *, linker: str | None) -> str:
     if scope:
         return scope
-    if linker:
-        normalized = linker.strip().lower().replace("_", "-")
-        if normalized:
-            return f"powermem/{normalized}"
-    return "powermem/default"
+    return DEFAULT_CONTEXTSEEK_SCOPE
 
 
 def _contextseek_proxy_env(plan: PowerMemServePlan) -> dict[str, str]:
@@ -219,6 +217,7 @@ def _start_powermem_server(plan: PowerMemServePlan) -> subprocess.Popen[str]:
     return subprocess.Popen(  # noqa: S603
         plan.powermem_command,
         env=env,
+        cwd=powermem_child_process_cwd(),
         text=True,
     )
 

@@ -145,6 +145,85 @@ export interface Health {
   version: string;
 }
 
+export type PlugLinkerStatus =
+  | "checking"
+  | "ready"
+  | "connected"
+  | "needs_action"
+  | "disabled"
+  | "planned";
+
+export type PlugBlockerStage = "target" | "runtime" | "channel" | "config";
+
+export interface PlugLinkerResult {
+  linker: string;
+  status: PlugLinkerStatus;
+  changed: boolean;
+  dry_run: boolean;
+  actions: string[];
+  warnings: string[];
+  blocker_stage?: PlugBlockerStage | null;
+  blocker_code?: string | null;
+}
+
+export interface PlugStatusResponse {
+  id: string;
+  name: string;
+  entries: PlugLinkerResult[];
+  _meta?: {
+    cached: boolean;
+    cached_at?: string | null;
+    refreshing: boolean;
+    refresh_job_id?: string | null;
+  };
+}
+
+export interface PlugCatalogResponse {
+  plugs: PlugStatusResponse[];
+}
+
+export interface PlugInstallRequest {
+  linker: string;
+  dry_run?: boolean;
+  check?: boolean;
+  target_only?: boolean;
+}
+
+export type PlugInstallJobStatus = "queued" | "running" | "succeeded" | "failed";
+
+export type PlugJobPhase = PlugBlockerStage | "refresh" | "done";
+
+export type PlugJobKind = "install" | "status_refresh";
+
+export interface PlugJobResponse {
+  job_id: string;
+  plug: string;
+  linker: string;
+  kind: PlugJobKind;
+  status: PlugInstallJobStatus;
+  phase: PlugJobPhase;
+  actions: string[];
+  warnings: string[];
+  entries: PlugLinkerResult[];
+  progress_current: number;
+  progress_total: number;
+  result?: unknown | null;
+  error?: string | null;
+  created_at: string;
+  updated_at: string;
+  finished_at?: string | null;
+}
+
+export interface PlugInstallJobResponse extends PlugJobResponse {
+  kind: "install";
+  result?: PlugLinkerResult | null;
+}
+
+export interface PlugStatusRefreshJobResponse extends PlugJobResponse {
+  kind: "status_refresh";
+  result?: PlugStatusResponse | null;
+}
+
 export interface EvidenceNode {
   item_id: string;
   intrinsic_confidence: number;

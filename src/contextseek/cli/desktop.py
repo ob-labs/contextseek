@@ -14,6 +14,29 @@ import sys
 from pathlib import Path
 
 
+_DESKTOP_CONFIG_SEED_PREFIXES = (
+    "EMBEDDING_",
+    "LLM_",
+    "OB_",
+    "OCEANBASE_",
+    "SEEKDB_",
+    "SQLITE_",
+)
+_DESKTOP_CONFIG_SEED_KEYS = {
+    "ANTHROPIC_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "DEFAULT_SCOPE",
+    "OPENAI_API_KEY",
+    "QWEN_API_KEY",
+    "SILICONFLOW_API_KEY",
+    "STORAGE_BACKEND",
+    "STORAGE_PATH",
+    "TIMEZONE",
+    "VLLM_API_KEY",
+}
+
+
 def _read_config_env(keys: set[str]) -> dict[str, str]:
     """Read simple KEY=value entries from the resolved ContextSeek config file."""
     try:
@@ -25,9 +48,18 @@ def _read_config_env(keys: set[str]) -> dict[str, str]:
     if not env_file:
         return {}
 
+    return {
+        key: value
+        for key, value in _read_env_file(Path(env_file)).items()
+        if key in keys
+    }
+
+
+def _read_env_file(path: Path) -> dict[str, str]:
+    """Read simple KEY=value entries from an env file."""
     values: dict[str, str] = {}
     try:
-        lines = Path(env_file).read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return values
 
@@ -37,9 +69,61 @@ def _read_config_env(keys: set[str]) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         key = key.strip().upper()
-        if key in keys:
-            values[key] = value.strip().strip('"').strip("'")
+        if not key:
+            continue
+        values[key] = value.strip().strip('"').strip("'")
     return values
+
+
+def _is_desktop_config_seed_key(key: str) -> bool:
+    return key in _DESKTOP_CONFIG_SEED_KEYS or key.startswith(
+        _DESKTOP_CONFIG_SEED_PREFIXES,
+    )
+
+
+def _desktop_config_seed_candidates(config_path: Path) -> list[Path]:
+    """Return config files that can seed the first desktop config."""
+    candidates: list[Path] = []
+    explicit = os.environ.get("CONTEXTSEEK_CONFIG", "").strip()
+    if explicit:
+        candidates.append(Path(explicit).expanduser())
+
+    project_root = Path(__file__).resolve().parents[3]
+    candidates.extend(
+        [
+            Path.cwd() / ".env",
+            project_root / ".env",
+            Path.home() / ".contextseek" / "config.env",
+        ],
+    )
+
+    result: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        path = candidate.expanduser()
+        try:
+            resolved = path.resolve()
+            target = config_path.resolve()
+        except OSError:
+            resolved = path
+            target = config_path
+        if resolved == target or resolved in seen or not path.is_file():
+            continue
+        seen.add(resolved)
+        result.append(path)
+    return result
+
+
+def _seed_desktop_config_values(config_path: Path) -> dict[str, str]:
+    for candidate in _desktop_config_seed_candidates(config_path):
+        values = {
+            key: value
+            for key, value in _read_env_file(candidate).items()
+            if _is_desktop_config_seed_key(key)
+        }
+        if values:
+            return values
+    return {}
 
 
 def _default_data_dir() -> Path:
@@ -88,6 +172,61 @@ def _configure_storage(data_dir: Path) -> str:
     return backend
 
 
+def _configure_desktop_path() -> None:
+    """Add common user CLI install directories to PATH for packaged desktop apps.
+
+    GUI apps and Tauri sidecars are often launched without the user's login-shell
+    PATH. Agent CLIs installed by npm/nvm/Homebrew can be present on the machine
+    but invisible to ``shutil.which`` unless we add these directories here.
+    """
+    current = os.environ.get("PATH", "")
+    existing = [part for part in current.split(os.pathsep) if part]
+    seen = {str(Path(part).expanduser()) for part in existing}
+    additions: list[str] = []
+
+    for path in _desktop_cli_search_paths():
+        text = str(path.expanduser())
+        if text in seen or not path.is_dir():
+            continue
+        seen.add(text)
+        additions.append(text)
+
+    if additions:
+        os.environ["PATH"] = os.pathsep.join([*additions, *existing])
+
+
+def _desktop_cli_search_paths() -> list[Path]:
+    home = Path.home()
+    paths = [
+        home / ".local" / "bin",
+        home / "bin",
+        home / ".npm-global" / "bin",
+        home / ".npm" / "bin",
+        home / ".volta" / "bin",
+        home / ".bun" / "bin",
+        home / "Library" / "pnpm",
+        Path("/opt/homebrew/bin"),
+        Path("/usr/local/bin"),
+        Path("/usr/bin"),
+        Path("/bin"),
+    ]
+    paths.extend(sorted((home / ".nvm" / "versions" / "node").glob("*/bin")))
+    paths.extend(
+        sorted((home / ".fnm" / "node-versions").glob("*/installation/bin")),
+    )
+
+    appdata = os.environ.get("APPDATA", "").strip()
+    localappdata = os.environ.get("LOCALAPPDATA", "").strip()
+    userprofile = os.environ.get("USERPROFILE", "").strip()
+    if appdata:
+        paths.append(Path(appdata) / "npm")
+    if localappdata:
+        paths.append(Path(localappdata) / "pnpm")
+    if userprofile:
+        paths.append(Path(userprofile) / "AppData" / "Roaming" / "npm")
+    return paths
+
+
 def _ensure_desktop_config(data_dir: Path) -> None:
     """Ensure the desktop app has a writable config.env file."""
     config_path = Path(
@@ -99,16 +238,22 @@ def _ensure_desktop_config(data_dir: Path) -> None:
         return
 
     default_sqlite = data_dir / "contextseek.sqlite3"
+    values = _seed_desktop_config_values(config_path)
+    values.setdefault("STORAGE_BACKEND", "sqlite")
+    if values["STORAGE_BACKEND"].strip().lower() == "sqlite":
+        values.setdefault("SQLITE_PATH", str(default_sqlite))
+    values.setdefault("LLM_PROVIDER", "none")
+    if values["LLM_PROVIDER"].strip().lower() == "none":
+        values.setdefault("LLM_MODEL", "none")
+    values.setdefault("EMBEDDING_PROVIDER", "none")
+    if values["EMBEDDING_PROVIDER"].strip().lower() == "none":
+        values.setdefault("EMBEDDING_MODEL", "none")
+
     config_path.write_text(
         "\n".join(
             [
                 "# ContextSeek desktop configuration",
-                "STORAGE_BACKEND=sqlite",
-                f"SQLITE_PATH={default_sqlite}",
-                "LLM_PROVIDER=none",
-                "LLM_MODEL=none",
-                "EMBEDDING_PROVIDER=none",
-                "EMBEDDING_MODEL=none",
+                *(f"{key}={value}" for key, value in values.items()),
                 "",
             ]
         ),
@@ -123,6 +268,7 @@ def run_desktop_server(args: argparse.Namespace) -> int:
     )
     data_dir.mkdir(parents=True, exist_ok=True)
     _ensure_desktop_config(data_dir)
+    _configure_desktop_path()
 
     backend = _configure_storage(data_dir)
 

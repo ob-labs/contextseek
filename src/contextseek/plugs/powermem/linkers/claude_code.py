@@ -3,13 +3,13 @@
 from pathlib import Path
 
 from contextseek.plugs.powermem.linkers.config import (
+    PowerMemClaudeCodeMCPConfigLinker,
     PowerMemClaudeCodeHTTPConfigLinker,
-    PowerMemMCPConfigLinker,
 )
 
 
-def create_linker() -> PowerMemMCPConfigLinker:
-    return PowerMemMCPConfigLinker(
+def create_linker() -> PowerMemClaudeCodeMCPConfigLinker:
+    return PowerMemClaudeCodeMCPConfigLinker(
         name="claude-code",
         target="Claude Code",
         config_env_var="CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG",
@@ -28,8 +28,8 @@ def create_http_linker() -> PowerMemClaudeCodeHTTPConfigLinker:
     )
 
 
-def create_mcp_linker() -> PowerMemMCPConfigLinker:
-    return PowerMemMCPConfigLinker(
+def create_mcp_linker() -> PowerMemClaudeCodeMCPConfigLinker:
+    return PowerMemClaudeCodeMCPConfigLinker(
         name="claude-code-mcp",
         target="Claude Code",
         config_env_var="CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG",

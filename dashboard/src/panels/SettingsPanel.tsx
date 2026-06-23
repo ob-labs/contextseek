@@ -248,6 +248,7 @@ export function SettingsPanel() {
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState<Partial<ConfigUpdateRequest>>({});
   const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const [showRestartDialog, setShowRestartDialog] = useState(false);
   const [isRestarting, setIsRestarting] = useState(false);
   const [testingTarget, setTestingTarget] = useState<"llm" | "embedding" | null>(null);
@@ -301,21 +302,36 @@ export function SettingsPanel() {
   };
 
   const handleEdit = () => {
+    setSaveError("");
     setDraft({});
     setIsEditing(true);
   };
 
   const handleCancel = () => {
+    setSaveError("");
     setDraft({});
     setIsEditing(false);
   };
 
   const handleSave = async () => {
+    const effectiveEmbeddingProvider =
+      draft.embedding_provider ?? currentEmbeddingProvider;
+    const effectiveEmbeddingModel = (
+      draft.embedding_model ?? config?.embedding_model ?? ""
+    ).trim();
+    if (
+      effectiveEmbeddingProvider !== "none" &&
+      effectiveEmbeddingModel.toLowerCase() === "none"
+    ) {
+      setSaveError(t("settings.embedder.modelRequired"));
+      return;
+    }
     if (Object.keys(draft).length === 0) {
       setIsEditing(false);
       return;
     }
     setIsSaving(true);
+    setSaveError("");
     try {
       const res = await ctx.updateConfig(draft);
       await fetchAll();
@@ -359,7 +375,30 @@ export function SettingsPanel() {
   };
 
   const setField = <K extends keyof ConfigUpdateRequest>(key: K, val: string) => {
-    setDraft((prev) => ({ ...prev, [key]: val }));
+    setSaveError("");
+    setDraft((prev) => {
+      if (key === "embedding_provider") {
+        if (val === "none") {
+          return {
+            ...prev,
+            embedding_provider: "none",
+            embedding_model: "none",
+            embedding_dims: "0",
+            embedding_base_url: "",
+            embedding_api_key: "",
+          };
+        }
+        return {
+          ...prev,
+          embedding_provider: val,
+          embedding_model:
+            (prev.embedding_model ?? config?.embedding_model) === "none"
+              ? ""
+              : prev.embedding_model,
+        };
+      }
+      return { ...prev, [key]: val };
+    });
     if (String(key).startsWith("llm_")) setLlmTestResult(null);
     if (String(key).startsWith("embedding_")) setEmbeddingTestResult(null);
   };
@@ -600,6 +639,11 @@ export function SettingsPanel() {
       {error && (
         <p className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-2 text-xs text-destructive">
           {t("settings.loadError")}
+        </p>
+      )}
+      {saveError && (
+        <p className="rounded-md border border-destructive/30 bg-destructive/10 px-4 py-2 text-xs text-destructive">
+          {saveError}
         </p>
       )}
 

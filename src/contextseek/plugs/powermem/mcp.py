@@ -17,7 +17,10 @@ from contextseek.plugs.powermem.adapter import (
     MEMORIES_PATH,
     PowerMemAdapter,
 )
-from contextseek.plugs.powermem.env import powermem_child_process_env
+from contextseek.plugs.powermem.env import (
+    powermem_child_process_cwd,
+    powermem_child_process_env,
+)
 from contextseek.plugs.powermem.linkers.runtime import PowerMemMCPRuntimeInstaller
 from contextseek.plugs.core.protocols import (
     PlugChangeEvent,
@@ -308,6 +311,7 @@ class PowerMemSDKSubprocessClient:
                 text=True,
                 timeout=self.timeout,
                 env=powermem_child_process_env(self.env),
+                cwd=powermem_child_process_cwd(),
             )
         except subprocess.TimeoutExpired as exc:
             raise TimeoutError("timed out waiting for PowerMem SDK response") from exc

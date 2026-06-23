@@ -6,6 +6,7 @@ import { NavContext, type NavTarget } from "@/context/NavContext";
 import { ScopeProvider } from "@/context/ScopeContext";
 import { BrowsePanel } from "@/panels/BrowsePanel";
 import { EvolutionPanel } from "@/panels/EvolutionPanel";
+import { IngressPanel } from "@/panels/IngressPanel";
 import { OverviewPanel } from "@/panels/OverviewPanel";
 import { ProvenancePanel } from "@/panels/ProvenancePanel";
 import { RetrievePanel } from "@/panels/RetrievePanel";
@@ -41,6 +42,7 @@ export function App() {
             {panel === "browse" && <BrowsePanel />}
             {panel === "write" && <WritePanel />}
             {panel === "evolution" && <EvolutionPanel />}
+            {panel === "ingress" && <IngressPanel />}
             {panel === "provenance" && <ProvenancePanel initialItemId={provenanceItemId} />}
             {panel === "skills" && <SkillsPanel />}
             {panel === "settings" && <SettingsPanel />}

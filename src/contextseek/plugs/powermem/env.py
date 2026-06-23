@@ -44,6 +44,19 @@ _POWERMEM_OVERRIDE_KEYS = {
     "EMBEDDING_DIMS",
     "EMBEDDING_API_KEY",
 }
+_POWERMEM_CHILD_ENV_ISOLATION_KEYS = {
+    "LLM_PROVIDER",
+    "LLM_MODEL",
+    "LLM_API_KEY",
+    "LLM_KWARGS",
+    "LLM_BASE_URL",
+    "EMBEDDING_PROVIDER",
+    "EMBEDDING_MODEL",
+    "EMBEDDING_DIMS",
+    "EMBEDDING_API_KEY",
+    "EMBEDDING_KWARGS",
+    "EMBEDDING_BASE_URL",
+}
 
 
 @dataclass(frozen=True)
@@ -69,20 +82,31 @@ def powermem_child_process_env(base: Mapping[str, str] | None = None) -> dict[st
     """Build the official PowerMem child-process env.
 
     PowerMem loads ``POWERMEM_ENV_FILE`` with dotenv ``override=False``. Remove
-    keys already managed by that file so ContextSeek's own same-name env vars do
-    not shadow PowerMem's config.
+    provider keys from the parent environment so ContextSeek/project ``.env``
+    values do not shadow the managed PowerMem config or PowerMem defaults.
     """
     env = dict(base or os.environ)
     env_file = Path(
         env.get(_POWERMEM_ENV_PATH_ENV, "") or str(managed_powermem_env_path()),
     ).expanduser()
     managed_values = read_env_file(env_file)
-    for key in managed_values:
+    for key in managed_values.keys() | _POWERMEM_CHILD_ENV_ISOLATION_KEYS:
         env.pop(key, None)
     env.update(managed_values)
     env["POWERMEM_ENV_FILE"] = str(env_file)
     env.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
     return env
+
+
+def powermem_child_process_cwd() -> Path:
+    """Return a safe cwd for PowerMem child processes.
+
+    PowerMem auto-loads ``Path.cwd() / ".env"``. Running it from the ContextSeek
+    project can accidentally load ContextSeek's own provider settings.
+    """
+    cwd = managed_powermem_env_path().parent
+    cwd.mkdir(parents=True, exist_ok=True)
+    return cwd
 
 
 def ensure_managed_powermem_env(
@@ -94,7 +118,8 @@ def ensure_managed_powermem_env(
     """Create or update the managed PowerMem env without overwriting user values."""
     path = managed_powermem_env_path()
     existing = read_env_file(path)
-    defaults = build_powermem_env_defaults()
+    raw = _contextseek_raw_env()
+    defaults = build_powermem_env_defaults(raw)
     if extra_defaults:
         defaults.update(
             {key: value for key, value in extra_defaults.items() if value != ""}
@@ -114,7 +139,7 @@ def ensure_managed_powermem_env(
         )
 
     merged = {**defaults, **existing}
-    warnings = manual_field_warnings(merged)
+    warnings = manual_field_warnings(merged, raw=raw)
     if check or dry_run:
         return PowerMemEnvResult(
             changed=changed,
@@ -135,9 +160,11 @@ def ensure_managed_powermem_env(
     )
 
 
-def build_powermem_env_defaults() -> dict[str, str]:
+def build_powermem_env_defaults(
+    raw: Mapping[str, str] | None = None,
+) -> dict[str, str]:
     """Infer PowerMem env values from ContextSeek env/config when possible."""
-    raw = _contextseek_raw_env()
+    raw = dict(raw or _contextseek_raw_env())
     values: dict[str, str] = {
         "DATABASE_PROVIDER": "sqlite",
         "SQLITE_PATH": _expand_user_value(_DEFAULT_SQLITE_PATH),
@@ -156,11 +183,23 @@ def build_powermem_env_defaults() -> dict[str, str]:
     return values
 
 
-def manual_field_warnings(values: dict[str, str]) -> list[str]:
+def manual_field_warnings(
+    values: dict[str, str],
+    *,
+    raw: Mapping[str, str] | None = None,
+) -> list[str]:
     """Return concise warnings for PowerMem settings ContextSeek cannot infer."""
     warnings: list[str] = []
+    raw_values = dict(raw or {})
     embedding_provider = values.get("EMBEDDING_PROVIDER", "").strip()
-    if not embedding_provider:
+    contextseek_embedding_provider = (
+        raw_values.get("EMBEDDING_PROVIDER", "").strip().lower()
+    )
+    if (
+        not embedding_provider
+        and contextseek_embedding_provider
+        and contextseek_embedding_provider != "none"
+    ):
         warnings.append("PowerMem EMBEDDING_PROVIDER cannot be inferred")
     if (
         embedding_provider
@@ -184,9 +223,14 @@ def manual_field_warnings(values: dict[str, str]) -> list[str]:
         warnings.append("PowerMem EMBEDDING_API_KEY cannot be inferred")
 
     llm_provider = values.get("LLM_PROVIDER", "").strip()
-    if not llm_provider:
+    contextseek_llm_provider = raw_values.get("LLM_PROVIDER", "").strip().lower()
+    if not llm_provider and contextseek_llm_provider != "none":
         warnings.append("PowerMem LLM_PROVIDER cannot be inferred")
-    if llm_provider and not values.get("LLM_MODEL", "").strip():
+    if (
+        llm_provider
+        and llm_provider != "none"
+        and not values.get("LLM_MODEL", "").strip()
+    ):
         warnings.append("PowerMem LLM_MODEL cannot be inferred")
     if (
         _provider_needs_api_key(llm_provider)
@@ -266,10 +310,6 @@ def _fill_storage(values: dict[str, str], raw: dict[str, str]) -> None:
 def _fill_embedding(values: dict[str, str], raw: dict[str, str]) -> None:
     configured_provider = raw.get("EMBEDDING_PROVIDER", "").strip().lower()
     if configured_provider == "none":
-        values["EMBEDDING_PROVIDER"] = "mock"
-        values["EMBEDDING_DIMS"] = raw.get(
-            "EMBEDDING_DIMS", _DEFAULT_LOCAL_EMBEDDING_DIMS
-        )
         return
     provider = _resolve_provider(
         raw,
@@ -278,6 +318,8 @@ def _fill_embedding(values: dict[str, str], raw: dict[str, str]) -> None:
         provider_map=_EMBEDDING_PROVIDER_MAP,
     )
     if not provider:
+        if configured_provider == "langchain":
+            return
         values["EMBEDDING_PROVIDER"] = _DEFAULT_LOCAL_EMBEDDING_PROVIDER
         values["EMBEDDING_MODEL"] = _DEFAULT_LOCAL_EMBEDDING_MODEL
         values["EMBEDDING_DIMS"] = _DEFAULT_LOCAL_EMBEDDING_DIMS
@@ -308,7 +350,9 @@ def _fill_embedding(values: dict[str, str], raw: dict[str, str]) -> None:
 
 def _fill_llm(values: dict[str, str], raw: dict[str, str]) -> None:
     configured_provider = raw.get("LLM_PROVIDER", "").strip().lower()
-    if configured_provider in {"", "none"}:
+    if configured_provider == "none":
+        return
+    if not configured_provider:
         return
     provider = _resolve_provider(
         raw,
@@ -364,7 +408,7 @@ def _resolve_provider(
     class_path = raw.get(class_path_key, "").strip().lower()
     if "openai" in class_path:
         return "openai"
-    if "dashscope" in class_path or "qwen" in class_path:
+    if "dashscope" in class_path or "qwen" in class_path or "tongyi" in class_path:
         return "qwen"
     if "anthropic" in class_path:
         return "anthropic"
@@ -374,7 +418,44 @@ def _resolve_provider(
         return "ollama"
     if "siliconflow" in class_path:
         return "siliconflow"
+    if configured == "langchain":
+        return _infer_langchain_provider(raw, provider_key=provider_key)
     return ""
+
+
+def _infer_langchain_provider(raw: dict[str, str], *, provider_key: str) -> str:
+    model_key = provider_key.replace("_PROVIDER", "_MODEL")
+    base_url_key = provider_key.replace("_PROVIDER", "_BASE_URL")
+    kwargs_key = provider_key.replace("_PROVIDER", "_KWARGS")
+    model = raw.get(model_key, "").strip().lower()
+    base_url = (
+        raw.get(base_url_key, "").strip()
+        or _kwargs_value(raw, kwargs_key, "base_url", "openai_api_base")
+    ).lower()
+
+    if "dashscope" in base_url or "aliyuncs" in base_url:
+        return "qwen"
+
+    if model.startswith("qwen-") and _provider_api_key(raw, "qwen"):
+        return "qwen"
+
+    if provider_key == "EMBEDDING_PROVIDER":
+        if model.startswith("text-embedding-v") and _provider_api_key(raw, "qwen"):
+            return "qwen"
+        if model.startswith("text-embedding-3-") and (
+            _provider_api_key(raw, "openai") or base_url
+        ):
+            return "openai"
+        return ""
+
+    if provider_key == "LLM_PROVIDER" and _is_openai_llm_model(model):
+        if _provider_api_key(raw, "openai") or base_url:
+            return "openai"
+    return ""
+
+
+def _is_openai_llm_model(model: str) -> bool:
+    return model.startswith(("gpt-", "o1", "o3", "o4"))
 
 
 def _kwargs_value(raw: dict[str, str], env_key: str, *names: str) -> str:

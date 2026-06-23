@@ -79,7 +79,7 @@ class PlugMCPProxy:
         method = str(request.get("method", ""))
         params = dict(request.get("params", {}))
         if method == "initialize":
-            return _success_response(request_id, _initialize_result())
+            return _success_response(request_id, _initialize_result(params))
         if method == "notifications/initialized":
             return None
         if method == "tools/list":
@@ -108,9 +108,12 @@ def _error_response(request_id: Any, code: int, message: str) -> dict[str, Any]:
     }
 
 
-def _initialize_result() -> dict[str, Any]:
+def _initialize_result(params: dict[str, Any] | None = None) -> dict[str, Any]:
+    protocol_version = str(
+        (params or {}).get("protocolVersion") or "2024-11-05",
+    )
     return {
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": protocol_version,
         "capabilities": {"tools": {}},
         "serverInfo": {
             "name": "contextseek-powermem-proxy",

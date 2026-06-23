@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import os
+import shlex
 import signal
+import shutil
 import sys
 import threading
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +22,7 @@ from contextseek.domain.serialization import (
 )
 
 try:
-    from fastapi import FastAPI
+    from fastapi import FastAPI, HTTPException
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.staticfiles import StaticFiles
     from pydantic import BaseModel, Field
@@ -153,6 +158,13 @@ class ItemsRequest(BaseModel):
     stage: str | None = None
 
 
+class PlugInstallRequest(BaseModel):
+    linker: str
+    dry_run: bool = False
+    check: bool = False
+    target_only: bool = False
+
+
 _API_ROOT_SEGMENTS: set[str] = {
     "add",
     "retrieve",
@@ -174,6 +186,7 @@ _API_ROOT_SEGMENTS: set[str] = {
     "scopes",
     "config",
     "metrics",
+    "plugs",
     "plugins",
     "seed",
     "health",
@@ -181,6 +194,550 @@ _API_ROOT_SEGMENTS: set[str] = {
     "restart",
     "__desktop",
 }
+
+_POWERMEM_STATUS_LINKERS = [
+    "claude-code",
+    "cursor",
+    "vscode",
+    "codex",
+    "windsurf",
+    "github-copilot",
+    "opencode",
+    "claude-desktop",
+    "cline",
+    "openclaw",
+    "qoder",
+]
+
+_POWERMEM_TARGET_COMMANDS: dict[str, tuple[str, ...]] = {
+    "claude-code": ("claude",),
+    "cursor": ("cursor",),
+    "vscode": ("code",),
+    "codex": ("codex",),
+    "windsurf": ("windsurf",),
+    "github-copilot": ("code",),
+    "opencode": ("opencode",),
+    "claude-desktop": ("claude-desktop",),
+    "cline": ("code",),
+    "openclaw": ("openclaw",),
+    "qoder": ("qoder",),
+}
+
+_POWERMEM_TARGET_COMMAND_ENV: dict[str, str] = {
+    "claude-code": "CONTEXTSEEK_CLAUDE_CODE_COMMAND",
+    "openclaw": "CONTEXTSEEK_OPENCLAW_COMMAND",
+}
+
+_POWERMEM_TARGET_LABELS: dict[str, str] = {
+    "claude-code": "Claude Code",
+    "cursor": "Cursor",
+    "vscode": "VS Code",
+    "codex": "Codex",
+    "windsurf": "Windsurf",
+    "github-copilot": "GitHub Copilot",
+    "opencode": "OpenCode",
+    "claude-desktop": "Claude Desktop",
+    "cline": "Cline",
+    "openclaw": "OpenClaw",
+    "qoder": "Qoder",
+}
+
+_JOB_TERMINAL_STATES = {"succeeded", "failed"}
+_PLUG_JOBS_LOCK = threading.Lock()
+_PLUG_JOBS: dict[str, "PlugInstallJob"] = {}
+_PLUG_STATUS_LOCK = threading.Lock()
+_POWERMEM_STATUS_CACHE: dict[str, dict[str, Any]] = {}
+_POWERMEM_STATUS_CACHE_UPDATED_AT: str | None = None
+
+
+@dataclass
+class PlugInstallJob:
+    job_id: str
+    plug: str
+    linker: str
+    kind: str = "install"
+    status: str = "queued"
+    phase: str = "target"
+    actions: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    entries: list[dict[str, Any]] = field(default_factory=list)
+    progress_current: int = 0
+    progress_total: int = 0
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    created_at: str = field(default_factory=lambda: _utc_now_iso())
+    updated_at: str = field(default_factory=lambda: _utc_now_iso())
+    finished_at: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "plug": self.plug,
+            "linker": self.linker,
+            "kind": self.kind,
+            "status": self.status,
+            "phase": self.phase,
+            "actions": list(self.actions),
+            "warnings": list(self.warnings),
+            "entries": [_clone_plug_result(entry) for entry in self.entries],
+            "progress_current": self.progress_current,
+            "progress_total": self.progress_total,
+            "result": self.result,
+            "error": self.error,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "finished_at": self.finished_at,
+        }
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _store_job(job: PlugInstallJob) -> None:
+    with _PLUG_JOBS_LOCK:
+        _PLUG_JOBS[job.job_id] = job
+
+
+def _get_job(job_id: str) -> PlugInstallJob | None:
+    with _PLUG_JOBS_LOCK:
+        return _PLUG_JOBS.get(job_id)
+
+
+def _get_active_plug_job(*, plug: str, kind: str) -> PlugInstallJob | None:
+    with _PLUG_JOBS_LOCK:
+        for job in _PLUG_JOBS.values():
+            if (
+                job.plug == plug
+                and job.kind == kind
+                and job.status not in _JOB_TERMINAL_STATES
+            ):
+                return job
+    return None
+
+
+def _update_job(job_id: str, **updates: Any) -> PlugInstallJob | None:
+    with _PLUG_JOBS_LOCK:
+        job = _PLUG_JOBS.get(job_id)
+        if job is None:
+            return None
+        for key, value in updates.items():
+            setattr(job, key, value)
+        job.updated_at = _utc_now_iso()
+        if job.status in _JOB_TERMINAL_STATES and job.finished_at is None:
+            job.finished_at = job.updated_at
+        return job
+
+
+def _plug_result_status(
+    *,
+    changed: bool,
+    dry_run: bool,
+    warnings: list[str],
+) -> str:
+    if warnings:
+        return "needs_action"
+    if dry_run and changed:
+        return "ready"
+    return "connected"
+
+
+def _clone_plug_result(result: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(result)
+    payload["actions"] = list(payload.get("actions") or [])
+    payload["warnings"] = list(payload.get("warnings") or [])
+    return payload
+
+
+def _classify_plug_warning(warnings: list[str]) -> tuple[str | None, str | None]:
+    if not warnings:
+        return None, None
+    text = " ".join(warnings).lower()
+    if "cli cannot be found" in text or "cannot be found; install" in text:
+        return "target", "target_not_detected"
+    if "mcp config path is not verified" in text:
+        return "target", "target_not_detected"
+    if "cannot be inferred; set contextseek_powermem_cli" in text:
+        return "runtime", "powermem_runtime_missing"
+    if "cannot be inferred" in text:
+        return "runtime", "powermem_env_missing"
+    if "failed to create managed python runtime" in text:
+        return "runtime", "powermem_runtime_failed"
+    if "failed to install python package" in text:
+        return "runtime", "powermem_install_failed"
+    if "failed to verify" in text and "python package" in text:
+        return "runtime", "powermem_install_failed"
+    if "failed to install openclaw plugin" in text:
+        return "channel", "agent_plugin_failed"
+    if "failed to verify openclaw plugin" in text:
+        return "channel", "agent_plugin_failed"
+    if "failed to install claude code plugin" in text:
+        return "channel", "agent_plugin_failed"
+    if "failed to enable claude code plugin" in text:
+        return "channel", "agent_plugin_failed"
+    if "hook binary is missing" in text:
+        return "channel", "agent_plugin_failed"
+    if "not valid json/jsonc" in text or "skip writing" in text:
+        return "config", "config_invalid"
+    return "config", "config_needs_action"
+
+
+def _command_available(command: str) -> bool:
+    parts = shlex.split(command)
+    if not parts:
+        return False
+    executable = parts[0]
+    if os.sep in executable:
+        return Path(executable).expanduser().is_file()
+    return shutil.which(executable) is not None
+
+
+def _powermem_target_probe(linker: str) -> dict[str, Any] | None:
+    label = _POWERMEM_TARGET_LABELS.get(linker, linker)
+    env_var = _POWERMEM_TARGET_COMMAND_ENV.get(linker)
+    commands = _POWERMEM_TARGET_COMMANDS.get(linker, ())
+    configured = os.environ.get(env_var, "").strip() if env_var else ""
+    candidates = (configured, *commands) if configured else commands
+    if not candidates:
+        return None
+    if any(_command_available(command) for command in candidates):
+        return None
+    hint = f" or set {env_var}" if env_var else ""
+    warning = f"{label} CLI cannot be found; install {label}{hint}"
+    return _plug_install_result_payload(
+        linker=linker,
+        changed=False,
+        dry_run=True,
+        actions=[f"detect target runtime: {label}"],
+        warnings=[warning],
+    )
+
+
+def _plug_install_result_payload(
+    *,
+    linker: str,
+    changed: bool,
+    dry_run: bool,
+    actions: list[str],
+    warnings: list[str],
+) -> dict[str, Any]:
+    blocker_stage, blocker_code = _classify_plug_warning(warnings)
+    return {
+        "linker": linker,
+        "status": _plug_result_status(
+            changed=changed,
+            dry_run=dry_run,
+            warnings=warnings,
+        ),
+        "changed": changed,
+        "dry_run": dry_run,
+        "actions": actions,
+        "warnings": warnings,
+        "blocker_stage": blocker_stage,
+        "blocker_code": blocker_code,
+    }
+
+
+def _plug_checking_result_payload(linker: str) -> dict[str, Any]:
+    return {
+        "linker": linker,
+        "status": "checking",
+        "changed": False,
+        "dry_run": True,
+        "actions": [],
+        "warnings": [],
+        "blocker_stage": None,
+        "blocker_code": None,
+    }
+
+
+def _cache_powermem_status_result(result: dict[str, Any]) -> None:
+    global _POWERMEM_STATUS_CACHE_UPDATED_AT
+    linker = str(result.get("linker") or "")
+    if not linker:
+        return
+    with _PLUG_STATUS_LOCK:
+        _POWERMEM_STATUS_CACHE[linker] = _clone_plug_result(result)
+        _POWERMEM_STATUS_CACHE_UPDATED_AT = _utc_now_iso()
+
+
+def _powermem_available_status_linkers() -> list[str]:
+    from contextseek.plugs.powermem.linkers import available_linker_names
+
+    available = set(available_linker_names())
+    return [linker for linker in _POWERMEM_STATUS_LINKERS if linker in available]
+
+
+def _powermem_cached_status_entries() -> tuple[list[dict[str, Any]], str | None, bool]:
+    linkers = _powermem_available_status_linkers()
+    with _PLUG_STATUS_LOCK:
+        cached_at = _POWERMEM_STATUS_CACHE_UPDATED_AT
+        entries = [
+            _clone_plug_result(
+                _POWERMEM_STATUS_CACHE.get(linker)
+                or _plug_checking_result_payload(linker)
+            )
+            for linker in linkers
+        ]
+        has_cache = any(linker in _POWERMEM_STATUS_CACHE for linker in linkers)
+    return entries, cached_at, has_cache
+
+
+def _run_powermem_linker(
+    *,
+    linker: str,
+    dry_run: bool = False,
+    check: bool = False,
+    probe_target: bool = True,
+) -> dict[str, Any]:
+    from contextseek.plugs.powermem import PowerMemAdapter
+    from contextseek.plugs.powermem.linkers import normalize_linker_name
+
+    normalized = normalize_linker_name(linker)
+    if probe_target:
+        target_result = _powermem_target_probe(normalized)
+        if target_result is not None:
+            return target_result
+    result = PowerMemAdapter().install(
+        linker=normalized,
+        dry_run=dry_run,
+        check=check,
+    )
+    return _plug_install_result_payload(
+        linker=normalized,
+        changed=result.changed,
+        dry_run=result.dry_run,
+        actions=list(result.actions),
+        warnings=list(result.warnings),
+    )
+
+
+def _create_plug_install_job(plug: str, req: PlugInstallRequest) -> PlugInstallJob:
+    from contextseek.plugs.powermem.linkers import normalize_linker_name
+
+    job = PlugInstallJob(
+        job_id=uuid.uuid4().hex,
+        plug=plug,
+        linker=normalize_linker_name(req.linker),
+        kind="install",
+    )
+    _store_job(job)
+    thread = threading.Thread(
+        target=_run_plug_install_job,
+        kwargs={
+            "job_id": job.job_id,
+            "dry_run": req.dry_run,
+            "check": req.check,
+            "target_only": req.target_only,
+        },
+        name=f"contextseek-plug-install-{plug}-{job.linker}",
+        daemon=True,
+    )
+    thread.start()
+    return job
+
+
+def _run_plug_install_job(
+    *,
+    job_id: str,
+    dry_run: bool,
+    check: bool,
+    target_only: bool,
+) -> None:
+    job = _update_job(job_id, status="running", phase="target")
+    if job is None:
+        return
+
+    try:
+        target_result = _powermem_target_probe(job.linker)
+        if target_result is not None:
+            _update_job(
+                job_id,
+                status="failed",
+                phase=target_result.get("blocker_stage") or "target",
+                actions=list(target_result.get("actions") or []),
+                warnings=list(target_result.get("warnings") or []),
+                result=target_result,
+            )
+            return
+
+        if target_only:
+            label = _POWERMEM_TARGET_LABELS.get(job.linker, job.linker)
+            result = _plug_install_result_payload(
+                linker=job.linker,
+                changed=True,
+                dry_run=True,
+                actions=[f"detect target runtime: {label}"],
+                warnings=[],
+            )
+            _cache_powermem_status_result(result)
+            _update_job(
+                job_id,
+                status="succeeded",
+                phase="done",
+                actions=list(result.get("actions") or []),
+                warnings=[],
+                result=result,
+            )
+            return
+
+        _update_job(
+            job_id,
+            status="running",
+            phase="runtime",
+            actions=[f"detect target runtime: {job.linker}"],
+        )
+        result = _run_powermem_linker(
+            linker=job.linker,
+            dry_run=dry_run,
+            check=check,
+            probe_target=False,
+        )
+        terminal_status = "failed" if result["status"] == "needs_action" else "succeeded"
+        _cache_powermem_status_result(result)
+        _update_job(
+            job_id,
+            status=terminal_status,
+            phase=result.get("blocker_stage") or "done",
+            actions=list(result.get("actions") or []),
+            warnings=list(result.get("warnings") or []),
+            result=result,
+        )
+    except Exception as exc:  # pragma: no cover - defensive worker boundary
+        result = _plug_install_result_payload(
+            linker=job.linker,
+            changed=False,
+            dry_run=dry_run or check,
+            actions=[],
+            warnings=[str(exc)],
+        )
+        _update_job(
+            job_id,
+            status="failed",
+            phase=result.get("blocker_stage") or "config",
+            warnings=list(result.get("warnings") or []),
+            result=result,
+            error=str(exc),
+        )
+
+
+def _create_powermem_status_refresh_job() -> PlugInstallJob:
+    active = _get_active_plug_job(plug="powermem", kind="status_refresh")
+    if active is not None:
+        return active
+
+    linkers = _powermem_available_status_linkers()
+    job = PlugInstallJob(
+        job_id=uuid.uuid4().hex,
+        plug="powermem",
+        linker="*",
+        kind="status_refresh",
+        phase="refresh",
+        progress_total=len(linkers),
+    )
+    _store_job(job)
+    thread = threading.Thread(
+        target=_run_powermem_status_refresh_job,
+        kwargs={"job_id": job.job_id, "linkers": linkers},
+        name="contextseek-plug-status-refresh-powermem",
+        daemon=True,
+    )
+    thread.start()
+    return job
+
+
+def _run_powermem_status_refresh_job(
+    *,
+    job_id: str,
+    linkers: list[str],
+) -> None:
+    job = _update_job(
+        job_id,
+        status="running",
+        phase="refresh",
+        progress_current=0,
+        progress_total=len(linkers),
+    )
+    if job is None:
+        return
+
+    entries: list[dict[str, Any]] = []
+    try:
+        for index, linker in enumerate(linkers):
+            _update_job(
+                job_id,
+                status="running",
+                phase="refresh",
+                progress_current=index,
+                progress_total=len(linkers),
+                actions=[f"checking {linker}"],
+                entries=entries,
+            )
+            try:
+                result = _run_powermem_linker(linker=linker, check=True)
+            except Exception as exc:  # pragma: no cover - defensive per-linker guard
+                result = _plug_install_result_payload(
+                    linker=linker,
+                    changed=False,
+                    dry_run=True,
+                    actions=[],
+                    warnings=[str(exc)],
+                )
+            _cache_powermem_status_result(result)
+            entries.append(result)
+            _update_job(
+                job_id,
+                status="running",
+                phase="refresh",
+                progress_current=index + 1,
+                progress_total=len(linkers),
+                actions=list(result.get("actions") or []),
+                warnings=list(result.get("warnings") or []),
+                entries=entries,
+            )
+
+        payload = _powermem_status_payload()
+        _update_job(
+            job_id,
+            status="succeeded",
+            phase="done",
+            progress_current=len(linkers),
+            progress_total=len(linkers),
+            entries=entries,
+            result=payload,
+        )
+    except Exception as exc:  # pragma: no cover - defensive worker boundary
+        _update_job(
+            job_id,
+            status="failed",
+            phase="refresh",
+            progress_current=len(entries),
+            progress_total=len(linkers),
+            entries=entries,
+            warnings=[str(exc)],
+            error=str(exc),
+        )
+
+
+def _powermem_status_payload() -> dict[str, Any]:
+    entries, cached_at, has_cache = _powermem_cached_status_entries()
+    active = _get_active_plug_job(plug="powermem", kind="status_refresh")
+    return {
+        "id": "powermem",
+        "name": "PowerMem",
+        "entries": entries,
+        "_meta": {
+            "cached": has_cache,
+            "cached_at": cached_at,
+            "refreshing": active is not None,
+            "refresh_job_id": active.job_id if active is not None else None,
+        },
+    }
+
+
+def _ensure_supported_plug(plug: str) -> None:
+    if plug != "powermem":
+        raise HTTPException(status_code=404, detail=f"unknown plug: {plug}")
 
 
 class SPAServingStaticFiles(StaticFiles):
@@ -372,6 +929,32 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
     from contextseek.plugs.core.proxy.http import create_plug_proxy_router
 
     app.include_router(create_plug_proxy_router(ctx))
+
+    @app.get("/plugs")
+    async def plug_catalog() -> dict[str, Any]:
+        return {"plugs": [_powermem_status_payload()]}
+
+    @app.get("/plugs/jobs/{job_id}")
+    async def plug_install_job(job_id: str) -> dict[str, Any]:
+        job = _get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail=f"unknown plug job: {job_id}")
+        return job.to_payload()
+
+    @app.post("/plugs/{plug}/status/refresh")
+    async def plug_status_refresh(plug: str) -> dict[str, Any]:
+        _ensure_supported_plug(plug)
+        return _create_powermem_status_refresh_job().to_payload()
+
+    @app.get("/plugs/{plug}")
+    async def plug_status(plug: str) -> dict[str, Any]:
+        _ensure_supported_plug(plug)
+        return _powermem_status_payload()
+
+    @app.post("/plugs/{plug}/install")
+    async def plug_install(plug: str, req: PlugInstallRequest) -> dict[str, Any]:
+        _ensure_supported_plug(plug)
+        return _create_plug_install_job(plug, req).to_payload()
 
     @app.post("/add")
     async def add_item(req: AddRequest) -> dict[str, Any]:
@@ -803,19 +1386,41 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
             "storage_path": "STORAGE_PATH",
         }
         updates: dict[str, str] = {}
-        for field, env_key in FIELD_TO_ENV.items():
-            val = getattr(req, field, None)
+        for field_name, env_key in FIELD_TO_ENV.items():
+            val = getattr(req, field_name, None)
             if val is not None:
-                if field == "embedding_dims" and val.strip() == "":
+                if field_name == "embedding_dims" and val.strip() == "":
                     val = "0"
                 updates[env_key] = val
+        if "EMBEDDING_PROVIDER" in updates or "EMBEDDING_MODEL" in updates:
+            from contextseek.config.settings import ContextSeekSettings
+
+            current = ContextSeekSettings()
+            provider = updates.get(
+                "EMBEDDING_PROVIDER", current.embedding.provider
+            ).strip()
+            model = updates.get("EMBEDDING_MODEL", current.embedding.model).strip()
+            provider_normalized = provider.lower()
+            model_normalized = model.lower()
+            if provider_normalized in {"", "none"}:
+                updates["EMBEDDING_PROVIDER"] = "none"
+                updates["EMBEDDING_MODEL"] = "none"
+                updates["EMBEDDING_DIMS"] = "0"
+                updates["EMBEDDING_BASE_URL"] = ""
+                updates["EMBEDDING_API_KEY"] = ""
+            elif model_normalized in {"", "none"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "EMBEDDING_MODEL must be a real model when "
+                        "EMBEDDING_PROVIDER is not none."
+                    ),
+                )
         if not updates:
             return {"status": "ok", "restart_required": False}
         try:
             _update_env_file(updates)
         except FileNotFoundError as e:
-            from fastapi import HTTPException
-
             raise HTTPException(status_code=500, detail=str(e)) from e
         return {"status": "ok", "restart_required": True}
 

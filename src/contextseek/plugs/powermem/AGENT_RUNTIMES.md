@@ -27,6 +27,7 @@ contextseek plug-install powermem --linker claude-code
 Then start Claude Code as usual.
 
 Claude Code uses MCP mode by default. You do not need to install the PowerMem Claude Code hook binary.
+The MCP server is registered at Claude Code user scope, so it is available across projects unless a project-level `powermem` MCP overrides it.
 
 You can also use the alias:
 

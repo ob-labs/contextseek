@@ -1,6 +1,7 @@
 """PowerMem plug adapters and proxy entry points."""
 
 from contextseek.plugs.powermem.adapter import (
+    DEFAULT_CONTEXTSEEK_SCOPE,
     DEFAULT_INSTANCE_ID,
     MEMORIES_PATH,
     MEMORIES_SEARCH_PATH,
@@ -30,6 +31,7 @@ from contextseek.plugs.powermem.plug import PowerMemPlug
 
 __all__ = [
     "DEFAULT_INSTANCE_ID",
+    "DEFAULT_CONTEXTSEEK_SCOPE",
     "MEMORIES_PATH",
     "MEMORIES_SEARCH_PATH",
     "POWERMEM_PLUG_NAME",

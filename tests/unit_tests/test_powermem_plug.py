@@ -3,6 +3,7 @@
 import json
 import os
 import shlex
+import subprocess
 from argparse import Namespace
 from pathlib import Path
 
@@ -22,7 +23,11 @@ from contextseek.plugs.powermem.mcp import (
     PowerMemSDKSubprocessClient,
     create_powermem_mcp_proxy,
 )
-from contextseek.plugs.powermem.env import powermem_child_process_env, read_env_file
+from contextseek.plugs.powermem.env import (
+    powermem_child_process_cwd,
+    powermem_child_process_env,
+    read_env_file,
+)
 from contextseek.plugs.powermem.serve import (
     _status_from_warnings,
     build_powermem_serve_plan,
@@ -30,6 +35,8 @@ from contextseek.plugs.powermem.serve import (
 import contextseek.plugs.powermem.sdk as powermem_sdk
 from contextseek.plugs.powermem.sdk import Memory as PowerMemMemoryProxy
 from contextseek.plugs.powermem.linkers import available_linker_names
+from contextseek.plugs.powermem.linkers.claude_code import create_linker as create_claude_code_linker
+import contextseek.plugs.powermem.linkers.config as linker_config
 from contextseek.plugs.core.protocols import PlugProxyRequest
 
 
@@ -242,6 +249,22 @@ def test_powermem_adapter_preserves_zero_importance() -> None:
     )
 
     assert events[0].importance == 0.0
+
+
+def test_powermem_adapter_defaults_scope_to_contextseek() -> None:
+    adapter = PowerMemAdapter(instance_id="i1")
+    events = adapter.events_from_write_response(
+        {"results": [{"id": "m1", "content": "hello", "event": "ADD"}]},
+        PlugProxyRequest(
+            method="POST",
+            path="/api/v1/memories",
+            body={"user_id": "u1", "agent_id": "claude-code"},
+            headers={},
+            query={},
+        ),
+    )
+
+    assert events[0].scope == "contextseek"
 
 
 def test_powermem_adapter_delete_request_creates_delete_event() -> None:
@@ -654,6 +677,120 @@ def test_claude_code_prefers_mcp_and_http_is_disabled_by_default(
     ]
 
 
+def test_claude_code_mcp_default_registers_user_scope_through_claude_cli(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    claude = tmp_path / "claude"
+    claude.write_text("#!/bin/sh\n", encoding="utf-8")
+    claude.chmod(0o755)
+    env_file = tmp_path / "powermem.env"
+    legacy_config = tmp_path / ".mcp.json"
+    legacy_config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "powermem": {
+                        "command": "contextseek-pmem-mcp-stdio",
+                        "args": [],
+                    },
+                    "other": {"command": "keep"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG", raising=False)
+    monkeypatch.delenv("STORAGE_BACKEND", raising=False)
+    monkeypatch.delenv("STORAGE_PATH", raising=False)
+    monkeypatch.delenv("SQLITE_PATH", raising=False)
+    monkeypatch.delenv("CONTEXTSEEK_CONFIG", raising=False)
+    monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(claude))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_ENV_FILE", str(env_file))
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(linker_config.subprocess, "run", fake_run)
+    linker = create_claude_code_linker()
+
+    result = linker.configure_proxy(plug_name="powermem")
+
+    assert result.changed is True
+    assert calls[0] == [
+        str(claude),
+        "mcp",
+        "remove",
+        "--scope",
+        "user",
+        "powermem",
+    ]
+    assert calls[1][:5] == [
+        str(claude),
+        "mcp",
+        "add-json",
+        "--scope",
+        "user",
+    ]
+    assert calls[1][5] == "powermem"
+    payload = json.loads(calls[1][6])
+    assert _command_name(payload["command"]) == "contextseek-pmem-mcp-stdio"
+    assert payload["env"]["CONTEXTSEEK_POWERMEM_ENV_FILE"] == str(env_file)
+    assert payload["env"]["STORAGE_BACKEND"] == "sqlite"
+    assert payload["env"]["SQLITE_PATH"].endswith("contextseek.sqlite3")
+    assert calls[2] == [str(claude), "mcp", "get", "powermem"]
+    assert any(
+        "verified Claude Code MCP server: powermem" in action
+        for action in result.actions
+    )
+    legacy_payload = json.loads(legacy_config.read_text(encoding="utf-8"))
+    assert "powermem" not in legacy_payload["mcpServers"]
+    assert legacy_payload["mcpServers"]["other"]["command"] == "keep"
+
+
+def test_claude_code_mcp_check_uses_claude_cli_get(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    claude = tmp_path / "claude"
+    claude.write_text("#!/bin/sh\n", encoding="utf-8")
+    claude.chmod(0o755)
+    calls: list[list[str]] = []
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG", raising=False)
+    monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(claude))
+    monkeypatch.setattr(
+        linker_config,
+        "ensure_managed_powermem_env",
+        lambda **_kwargs: linker_config.LinkerResult(
+            changed=False,
+            dry_run=True,
+            actions=["prepare managed PowerMem env"],
+            warnings=[],
+        ),
+    )
+
+    def fake_run(command, **kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(linker_config.subprocess, "run", fake_run)
+    linker = create_claude_code_linker()
+
+    result = linker.configure_proxy(plug_name="powermem", check=True)
+
+    assert result.changed is False
+    assert result.dry_run is True
+    assert result.warnings == []
+    assert calls == [[str(claude), "mcp", "get", "powermem"]]
+    assert any(
+        "verified Claude Code MCP server: powermem" in action
+        for action in result.actions
+    )
+
+
 def test_proxy_install_openclaw_defaults_to_cli_config(
     tmp_path,
     monkeypatch,
@@ -683,6 +820,7 @@ def test_proxy_install_openclaw_defaults_to_cli_config(
     values = read_env_file(powermem_env)
     assert values["CONTEXTSEEK_POWERMEM_CLI"] == str(real_pmem)
     assert values["CONTEXTSEEK_POWERMEM_ENV_FILE"] == str(powermem_env)
+    assert values["CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE"] == "contextseek"
 
 
 def test_proxy_install_openclaw_defaults_to_managed_cli(
@@ -958,6 +1096,7 @@ def test_proxy_install_claude_code_mcp_carries_runtime_env(
     payload = json.loads(config.read_text(encoding="utf-8"))
     server_env = payload["mcpServers"]["powermem"]["env"]
     assert server_env["CONTEXTSEEK_POWERMEM_RUNTIME_DIR"] == str(runtime_dir)
+    assert server_env["CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE"] == "contextseek"
 
 
 def test_powermem_mcp_stdio_client_defaults_to_managed_backend(
@@ -1233,6 +1372,87 @@ def test_proxy_install_infers_langchain_openai_kwargs(
     assert not result.warnings
 
 
+def test_proxy_install_infers_langchain_qwen_from_model_and_dashscope_key(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    powermem_env = tmp_path / "powermem.env"
+    monkeypatch.setenv("CONTEXTSEEK_CONFIG", str(tmp_path / "contextseek.env"))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("LLM_PROVIDER", "langchain")
+    monkeypatch.setenv("LLM_MODEL", "qwen-plus")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "dashscope-key")
+    monkeypatch.delenv("LLM_CLASS_PATH", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+
+    result = plug.install(linker="claude-code")
+
+    values = read_env_file(powermem_env)
+    assert values["LLM_PROVIDER"] == "qwen"
+    assert values["LLM_MODEL"] == "qwen-plus"
+    assert values["LLM_API_KEY"] == "dashscope-key"
+    assert not any("PowerMem LLM_PROVIDER" in warning for warning in result.warnings)
+
+
+def test_proxy_install_infers_langchain_openai_embedding_from_model(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    powermem_env = tmp_path / "powermem.env"
+    monkeypatch.setenv("CONTEXTSEEK_CONFIG", str(tmp_path / "contextseek.env"))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "langchain")
+    monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("EMBEDDING_DIMS", "1536")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.delenv("EMBEDDING_CLASS_PATH", raising=False)
+    monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+
+    result = plug.install(linker="claude-code")
+
+    values = read_env_file(powermem_env)
+    assert values["EMBEDDING_PROVIDER"] == "openai"
+    assert values["EMBEDDING_MODEL"] == "text-embedding-3-small"
+    assert values["EMBEDDING_DIMS"] == "1536"
+    assert values["EMBEDDING_API_KEY"] == "openai-key"
+    assert not any(
+        "PowerMem EMBEDDING_PROVIDER" in warning for warning in result.warnings
+    )
+
+
+def test_proxy_install_does_not_guess_ambiguous_langchain_provider(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    powermem_env = tmp_path / "powermem.env"
+    monkeypatch.setenv("CONTEXTSEEK_CONFIG", str(tmp_path / "contextseek.env"))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("LLM_PROVIDER", "langchain")
+    monkeypatch.setenv("LLM_MODEL", "qwen-plus")
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "langchain")
+    monkeypatch.setenv("EMBEDDING_MODEL", "custom-embedding")
+    monkeypatch.delenv("LLM_CLASS_PATH", raising=False)
+    monkeypatch.delenv("EMBEDDING_CLASS_PATH", raising=False)
+    monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("QWEN_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+
+    result = plug.install(linker="claude-code")
+
+    values = read_env_file(powermem_env)
+    assert "LLM_PROVIDER" not in values
+    assert "EMBEDDING_PROVIDER" not in values
+    assert "PowerMem LLM_PROVIDER cannot be inferred" in result.warnings
+    assert "PowerMem EMBEDDING_PROVIDER cannot be inferred" in result.warnings
+
+
 def test_proxy_install_preserves_existing_managed_powermem_env_values(
     tmp_path,
     monkeypatch,
@@ -1251,7 +1471,39 @@ def test_proxy_install_preserves_existing_managed_powermem_env_values(
     assert values["EMBEDDING_API_KEY"] == "custom-key"
 
 
-def test_proxy_install_maps_contextseek_none_embedding_to_powermem_mock(
+def test_powermem_child_process_env_isolates_project_provider_env(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    powermem_env = tmp_path / "powermem.env"
+    powermem_env.write_text(
+        "DATABASE_PROVIDER=sqlite\nSQLITE_PATH=/tmp/powermem.sqlite3\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_ENV_FILE", str(powermem_env))
+
+    env = powermem_child_process_env(
+        {
+            "KEEP_ME": "1",
+            "LLM_PROVIDER": "langchain",
+            "LLM_MODEL": "qwen-plus",
+            "EMBEDDING_PROVIDER": "langchain",
+            "EMBEDDING_MODEL": "text-embedding-3-small",
+        }
+    )
+
+    assert env["KEEP_ME"] == "1"
+    assert env["DATABASE_PROVIDER"] == "sqlite"
+    assert env["SQLITE_PATH"] == "/tmp/powermem.sqlite3"
+    assert env["POWERMEM_ENV_FILE"] == str(powermem_env)
+    assert "LLM_PROVIDER" not in env
+    assert "LLM_MODEL" not in env
+    assert "EMBEDDING_PROVIDER" not in env
+    assert "EMBEDDING_MODEL" not in env
+    assert powermem_child_process_cwd() == tmp_path
+
+
+def test_proxy_install_leaves_contextseek_none_embedding_to_powermem_default(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1270,12 +1522,12 @@ def test_proxy_install_maps_contextseek_none_embedding_to_powermem_mock(
     result = plug.install(linker="claude-code")
 
     values = read_env_file(powermem_env)
-    assert values["EMBEDDING_PROVIDER"] == "mock"
-    assert values["EMBEDDING_DIMS"] == "384"
+    assert "EMBEDDING_PROVIDER" not in values
+    assert "EMBEDDING_DIMS" not in values
     assert "LLM_PROVIDER" not in values
-    assert not any("EMBEDDING" in warning for warning in result.warnings)
-    assert "PowerMem LLM_PROVIDER cannot be inferred" in result.warnings
-    assert _plug_install_status(result.warnings) == 1
+    assert "LLM_MODEL" not in values
+    assert not result.warnings
+    assert _plug_install_status(result.warnings) == 0
 
 
 def test_proxy_install_ignores_prefixed_powermem_llm_override(
@@ -1295,7 +1547,7 @@ def test_proxy_install_ignores_prefixed_powermem_llm_override(
     values = read_env_file(powermem_env)
     assert "LLM_PROVIDER" not in values
     assert "LLM_MODEL" not in values
-    assert "PowerMem LLM_PROVIDER cannot be inferred" in result.warnings
+    assert not any("PowerMem LLM" in warning for warning in result.warnings)
 
 
 def _fake_claude_command(
@@ -1468,7 +1720,7 @@ def test_powermem_serve_plan_defaults(tmp_path, monkeypatch) -> None:
     assert plan.default_scope == "powermem/claude-code"
 
 
-def test_powermem_serve_plan_defaults_scope_from_linker() -> None:
+def test_powermem_serve_plan_defaults_scope_to_contextseek() -> None:
     plan = build_powermem_serve_plan(
         Namespace(
             host="127.0.0.1",
@@ -1484,7 +1736,7 @@ def test_powermem_serve_plan_defaults_scope_from_linker() -> None:
         )
     )
 
-    assert plan.default_scope == "powermem/claude-code"
+    assert plan.default_scope == "contextseek"
 
 
 def test_plug_serve_dry_run_outputs_plan(capsys, tmp_path, monkeypatch) -> None:

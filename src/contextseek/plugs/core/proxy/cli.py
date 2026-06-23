@@ -23,13 +23,19 @@ class CLIRunResult:
     returncode: int
 
 
-def run_cli(argv: list[str], *, env: dict[str, str] | None = None) -> CLIRunResult:
+def run_cli(
+    argv: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    cwd: str | os.PathLike[str] | None = None,
+) -> CLIRunResult:
     completed = subprocess.run(  # noqa: S603
         argv,
         check=False,
         capture_output=True,
         text=True,
         env=env,
+        cwd=cwd,
     )
     return CLIRunResult(
         stdout=completed.stdout,
