@@ -92,7 +92,9 @@ def test_ensure_desktop_config_does_not_overwrite_existing_file(
     data_dir = tmp_path / "desktop-data"
     data_dir.mkdir()
     config = data_dir / "config.env"
-    config.write_text("STORAGE_BACKEND=file\nSTORAGE_PATH=/tmp/store\n", encoding="utf-8")
+    config.write_text(
+        "STORAGE_BACKEND=file\nSTORAGE_PATH=/tmp/store\n", encoding="utf-8"
+    )
 
     desktop._ensure_desktop_config(data_dir)
 

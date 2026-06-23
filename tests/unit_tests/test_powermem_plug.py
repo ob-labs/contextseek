@@ -35,7 +35,9 @@ from contextseek.plugs.powermem.serve import (
 import contextseek.plugs.powermem.sdk as powermem_sdk
 from contextseek.plugs.powermem.sdk import Memory as PowerMemMemoryProxy
 from contextseek.plugs.powermem.linkers import available_linker_names
-from contextseek.plugs.powermem.linkers.claude_code import create_linker as create_claude_code_linker
+from contextseek.plugs.powermem.linkers.claude_code import (
+    create_linker as create_claude_code_linker,
+)
 import contextseek.plugs.powermem.linkers.config as linker_config
 from contextseek.plugs.core.protocols import PlugProxyRequest
 

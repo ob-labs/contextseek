@@ -199,9 +199,7 @@ def test_http_compact_returns_conflict_counts() -> None:
     }
 
 
-def test_http_update_config_normalizes_embedding_none(
-    monkeypatch, tmp_path
-) -> None:
+def test_http_update_config_normalizes_embedding_none(monkeypatch, tmp_path) -> None:
     env_path = tmp_path / "config.env"
     env_path.write_text(
         "\n".join(
@@ -308,7 +306,9 @@ def test_http_plug_install_returns_job_and_linker_result(monkeypatch, tmp_path) 
     }
 
 
-def test_http_plug_install_fails_fast_when_target_missing(monkeypatch, tmp_path) -> None:
+def test_http_plug_install_fails_fast_when_target_missing(
+    monkeypatch, tmp_path
+) -> None:
     _clear_plug_status_cache()
     calls: list[dict[str, object]] = []
     monkeypatch.setenv("PATH", str(tmp_path))
@@ -416,7 +416,9 @@ def test_http_plug_status_returns_checking_without_full_check(
             changed=False,
             dry_run=True,
             actions=["skip Qoder MCP config"],
-            warnings=["Qoder MCP config path is not verified; no default file was written"],
+            warnings=[
+                "Qoder MCP config path is not verified; no default file was written"
+            ],
         )
 
     monkeypatch.setattr(
@@ -463,7 +465,9 @@ def test_http_plug_status_refresh_classifies_missing_target(
             changed=False,
             dry_run=True,
             actions=["skip Qoder MCP config"],
-            warnings=["Qoder MCP config path is not verified; no default file was written"],
+            warnings=[
+                "Qoder MCP config path is not verified; no default file was written"
+            ],
         )
 
     monkeypatch.setattr(

@@ -593,7 +593,9 @@ def _run_plug_install_job(
             check=check,
             probe_target=False,
         )
-        terminal_status = "failed" if result["status"] == "needs_action" else "succeeded"
+        terminal_status = (
+            "failed" if result["status"] == "needs_action" else "succeeded"
+        )
         _cache_powermem_status_result(result)
         _update_job(
             job_id,
