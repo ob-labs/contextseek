@@ -28,7 +28,9 @@ def _canonical_json(obj: Any) -> str:
 
 
 def _payload_hash(payload: dict) -> str:
-    return "sha256:" + hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+    return (
+        "sha256:" + hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+    )
 
 
 def _set_path(nested: dict, dotted_key: str, value: Any) -> None:
@@ -40,47 +42,29 @@ def _set_path(nested: dict, dotted_key: str, value: Any) -> None:
     cur[parts[-1]] = value
 
 
-def _is_leaf_dict(d: dict) -> bool:
-    """A dict is a 'leaf' if it has no dict values (treat scalars/lists as leaves)."""
-    return not any(isinstance(v, dict) for v in d.values())
-
-
 def _merge(native: dict, projected: dict) -> tuple[dict, dict]:
     """Merge ``projected`` (baseline) with ``native`` (overrides).
 
     Returns ``(effective, override_sources)`` where ``override_sources`` maps
-    dotted keys to ``"native"`` or ``"projected:agentseek"``.
+    dotted leaf-key paths to ``"native"`` or ``"projected:agentseek"``. Dicts
+    are always recursed into; a leaf is any non-dict value, so ``native``
+    overrides individual leaf keys while preserving projected siblings.
     """
     effective: dict = {}
     sources: dict = {}
 
-    def walk(base: dict, source_label: str, prefix: str = "") -> None:
+    def walk(base: dict, target: dict, source_label: str, prefix: str = "") -> None:
         for k, v in base.items():
             key = f"{prefix}.{k}" if prefix else k
-            if isinstance(v, dict) and not _is_leaf_dict(v):
-                effective.setdefault(k, {})
-                sources.setdefault(key, source_label)
-                walk(v, source_label, key)
+            if isinstance(v, dict):
+                child = target.setdefault(k, {})
+                walk(v, child, source_label, key)
             else:
-                effective[k] = v
+                target[k] = v
                 sources[key] = source_label
 
-    walk(projected, "projected:agentseek")
-    # native overrides
-    def walk_native(base: dict, prefix: str = "") -> None:
-        for k, v in base.items():
-            key = f"{prefix}.{k}" if prefix else k
-            if isinstance(v, dict) and not _is_leaf_dict(v):
-                eff_child = effective.get(k)
-                if not isinstance(eff_child, dict):
-                    effective[k] = {}
-                sources[key] = "native"
-                walk_native(v, key)
-            else:
-                effective[k] = v
-                sources[key] = "native"
-
-    walk_native(native)
+    walk(projected, effective, "projected:agentseek")
+    walk(native, effective, "native")
     return effective, sources
 
 
@@ -145,7 +129,10 @@ class ConfigManager:
         records = list(reversed(records))  # newest first
         if n is not None:
             records = records[:n]
-        return [self._load_version(self.history_dir / f"{r['version_id']}.json") for r in records]
+        return [
+            self._load_version(self.history_dir / f"{r['version_id']}.json")
+            for r in records
+        ]
 
     def _load_version(self, path: Path) -> ConfigVersion:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -164,7 +151,9 @@ class ConfigManager:
         )
 
     # ---------------------------------------------------------------- write
-    def set_native(self, key: str, value: Any, *, author: str, reason: str) -> ConfigVersion:
+    def set_native(
+        self, key: str, value: Any, *, author: str, reason: str
+    ) -> ConfigVersion:
         cur = self.current()
         native = dict(cur.payload.get("native", {})) if cur else {}
         _set_path(native, key, value)
@@ -228,7 +217,8 @@ class ConfigManager:
         count = 0
         if self.manifest_path.exists():
             count = sum(
-                1 for line in self.manifest_path.read_text(encoding="utf-8").splitlines()
+                1
+                for line in self.manifest_path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             )
         return f"v{count + 1:06d}"
@@ -267,12 +257,10 @@ class ConfigManager:
         with self.manifest_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(manifest_record, ensure_ascii=False) + "\n")
 
-        self.current_path.write_text(
-            _canonical_json(version.payload), encoding="utf-8"
-        )
+        self.current_path.write_text(_canonical_json(version.payload), encoding="utf-8")
 
     # ----------------------------------------------------------------- diff
-    def _diff_payloads(self, a: dict, b: dict, prefix: str = "") -> dict:
+    def _diff_payloads(self, a: dict, b: dict) -> dict:
         """Compare two effective payloads, return {added, changed, removed}."""
         added, changed, removed = [], [], []
 
@@ -280,7 +268,7 @@ class ConfigManager:
             out: dict[str, Any] = {}
             for k, v in d.items():
                 key = f"{pre}.{k}" if pre else k
-                if isinstance(v, dict) and not _is_leaf_dict(v):
+                if isinstance(v, dict):
                     out.update(flat(v, key))
                 else:
                     out[key] = v
@@ -295,4 +283,8 @@ class ConfigManager:
         for k in fb:
             if k not in fa:
                 added.append(k)
-        return {"added": sorted(added), "changed": sorted(changed), "removed": sorted(removed)}
+        return {
+            "added": sorted(added),
+            "changed": sorted(changed),
+            "removed": sorted(removed),
+        }

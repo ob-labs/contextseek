@@ -89,3 +89,60 @@ def test_projected_used_when_native_absent(manager: ConfigManager):
         source_ref="agentseek@config.yml:sha256:abc",
     )
     assert manager.current().payload["effective"]["llm"]["model"] == "projected-model"
+
+
+def test_merge_preserves_projected_sibling_keys(manager: ConfigManager):
+    manager.commit(
+        projected={"llm": {"model": "p", "max_tokens": 4096}},
+        origin="agentseek-projection",
+        author="agentseek",
+        reason="proj",
+        source_ref="agentseek@config.yml:sha256:abc",
+    )
+    v = manager.set_native(
+        "llm.model", "native-model", author="a", reason="override one key"
+    )
+    eff = v.payload["effective"]
+    assert eff["llm"]["model"] == "native-model"
+    assert eff["llm"]["max_tokens"] == 4096  # projected sibling preserved
+    assert v.override_sources["llm.model"] == "native"
+    assert v.override_sources["llm.max_tokens"] == "projected:agentseek"
+
+
+def test_merge_deep_nested_override(manager: ConfigManager):
+    manager.commit(
+        projected={"a": {"b": {"c": "proj", "d": "keep"}}},
+        origin="agentseek-projection",
+        author="agentseek",
+        reason="proj",
+        source_ref="agentseek@config.yml:sha256:abc",
+    )
+    v = manager.set_native("a.b.c", "native", author="a", reason="deep override")
+    eff = v.payload["effective"]
+    assert eff["a"]["b"]["c"] == "native"
+    assert eff["a"]["b"]["d"] == "keep"
+
+
+def test_set_native_many_updates_multiple_keys(manager: ConfigManager):
+    v = manager.set_native_many(
+        {"llm.model": "gpt-4o", "llm.provider": "openai"},
+        author="a",
+        reason="batch",
+    )
+    eff = v.payload["effective"]
+    assert eff["llm"]["model"] == "gpt-4o"
+    assert eff["llm"]["provider"] == "openai"
+
+
+def test_get_version_raises_for_unknown(manager: ConfigManager):
+    import pytest
+
+    manager.set_native("llm.model", "gpt-4o", author="a", reason="r")
+    with pytest.raises(KeyError):
+        manager.get_version("v999999")
+
+
+def test_history_limit_respected(manager: ConfigManager):
+    for i in range(5):
+        manager.set_native("llm.model", f"m{i}", author="a", reason=f"r{i}")
+    assert len(manager.history(n=3)) == 3
