@@ -53,6 +53,7 @@
 - Produces:
   - `iter_env_vars(settings_cls=ContextSeekSettings) -> Iterator[str]` — 所有 env 变量名（大写），供 Ingestor fallback。
   - `iter_section_env_fields(settings_cls=ContextSeekSettings) -> Iterator[tuple[str, str, str]]` — yield `(section, field, env_name)`，供 Materializer 写 `.env`。
+  - `env_to_section_field() -> dict[str, tuple[str, str]]` — `{env_name: (section, field)}` 逆向映射，供迁移 / `PUT /config` 把 env 反演成 dotted 路径。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -63,6 +64,7 @@
 from __future__ import annotations
 
 from contextseek.config.envreflector import (
+    env_to_section_field,
     iter_env_vars,
     iter_section_env_fields,
 )
@@ -83,6 +85,12 @@ def test_iter_section_env_fields_pairs_section_field_env():
     # every env name is uppercase
     for _section, _field, env in triples:
         assert env == env.upper()
+
+
+def test_env_to_section_field_reverse_map():
+    rev = env_to_section_field()
+    assert rev["STORAGE_BACKEND"] == ("storage", "backend")
+    assert rev["LLM_MODEL"] == ("llm", "model")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -104,7 +112,6 @@ config manager can (a) write a valid ``.env`` from an effective config and
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import type
 
 from pydantic_settings import BaseSettings
 
@@ -154,6 +161,18 @@ def iter_section_env_fields(
                 sub_name,
                 env_name if case_sensitive else env_name.upper(),
             )
+
+
+def env_to_section_field(
+    settings_cls: type[BaseSettings] = ContextSeekSettings,
+) -> dict[str, tuple[str, str]]:
+    """Reverse map: ``{env_name: (section, field)}`` for every nested group.
+
+    Used by the migrator and the ``PUT /config`` reroute to translate an env
+    var (or a dashboard flat field, via ``FIELD_TO_ENV``) back into a dotted
+    native path ``section.field``.
+    """
+    return {env: (section, field) for section, field, env in iter_section_env_fields(settings_cls)}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -938,6 +957,18 @@ def test_detect_drift_when_file_hand_edited(materializer: Materializer, tmp_path
     (tmp_path / ".env").write_text("LLM_MODEL=tampered\n")
     drift = materializer.detect_drift(eff)
     assert drift["env"] is True
+
+
+def test_effective_to_env_passes_through_extra_env():
+    # _extra_env holds non-settings keys preserved during migration.
+    env = effective_to_env(
+        {"llm": {"model": "gpt-4o"}, "_extra_env": {"SOME_OTHER_VAR": "keep-me"}}
+    )
+    assert "LLM_MODEL=gpt-4o" in env
+    assert "SOME_OTHER_VAR=keep-me" in env
+```
+
+> 注：`effective_to_env` 在写完反射出的 settings 字段后，必须再把 `effective.get("_extra_env", {})` 里的每个 `KEY=value` 原样追加，确保迁移时未被 settings 跟踪的 env 变量不丢。`dry_run_validate` / `expected_hashes` / `detect_drift` 都经 `effective_to_env`，因此自动一致。
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -982,7 +1013,12 @@ def _flat_get(d: dict, dotted_key: str):
 
 
 def effective_to_env(effective: dict) -> str:
-    """Render an effective config as ``.env`` text (``KEY=value`` lines)."""
+    """Render an effective config as ``.env`` text (``KEY=value`` lines).
+
+    Settings-backed fields are emitted via :func:`iter_section_env_fields`.
+    Any non-settings keys preserved under ``effective["_extra_env"]`` (during
+    migration) are appended verbatim so a full rewrite never drops them.
+    """
     section_fields = list(iter_section_env_fields())
     lines: list[str] = []
     for section, field, env_name in section_fields:
@@ -992,6 +1028,10 @@ def effective_to_env(effective: dict) -> str:
         if isinstance(value, bool):
             value = "true" if value else "false"
         lines.append(f"{env_name}={value}")
+    for key, value in (effective.get("_extra_env") or {}).items():
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        lines.append(f"{key}={value}")
     return "\n".join(lines) + ("\n" if lines else "")
 
 
@@ -1925,14 +1965,210 @@ git commit -m "feat(config): add `contextseek config` CLI subcommand group"
 
 ---
 
-### Task 9: 公共 API 导出 + 文档更新
+### Task 9: migrator — 把现有 .env / config.json 导入为 native v1 + `config import` CLI
+
+**Files:**
+- Create: `src/contextseek/config/migrator.py`
+- Modify: `src/contextseek/config/cli.py`（加 `import` 子命令）
+- Modify: `src/contextseek/cli/main.py`（无需改，`register_config_subparser` 内注册即可）
+- Test: `tests/unit_tests/test_config_migrator.py`
+
+**Interfaces:**
+- Consumes: `contextseek.config.envreflector.env_to_section_field`；`ConfigManager`。
+- Produces:
+  - `def import_existing(env_path: Path | None, runtime_path: Path | None) -> dict` — 返回 `native` dict（含 `_extra_env` 透传区），不写库。
+  - `def migrate_into(manager: ConfigManager, *, env_path: Path | None = None, runtime_path: Path | None = None, author: str = "system", reason: str = "migrate existing config") -> ConfigVersion | None` — 若库已非空则返回 None；否则 commit 一个 `origin=migration` 的 v1。
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/unit_tests/test_config_migrator.py
+"""Tests for migrating existing .env / config.json into the managed store."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from contextseek.config.manager import ConfigManager
+from contextseek.config.migrator import import_existing, migrate_into
+
+
+def test_import_existing_maps_env_to_native(tmp_path: Path):
+    env = tmp_path / ".env"
+    env.write_text("LLM_MODEL=gpt-4o\nLLM_PROVIDER=openai\nSOME_OTHER=keep\n")
+    native = import_existing(env_path=env, runtime_path=None)
+    assert native["llm"]["model"] == "gpt-4o"
+    assert native["llm"]["provider"] == "openai"
+    # non-settings key preserved in _extra_env
+    assert native["_extra_env"]["SOME_OTHER"] == "keep"
+
+
+def test_migrate_into_creates_v1_migration(tmp_path: Path):
+    env = tmp_path / ".env"
+    env.write_text("LLM_MODEL=gpt-4o\n")
+    mgr = ConfigManager(tmp_path / "config")
+    mgr.init_store()
+    v = migrate_into(mgr, env_path=env, runtime_path=None)
+    assert v is not None
+    assert v.origin == "migration"
+    assert v.version_id == "v000001"
+    assert v.payload["native"]["llm"]["model"] == "gpt-4o"
+
+
+def test_migrate_into_noop_when_store_nonempty(tmp_path: Path):
+    env = tmp_path / ".env"
+    env.write_text("LLM_MODEL=gpt-4o\n")
+    mgr = ConfigManager(tmp_path / "config")
+    mgr.init_store()
+    mgr.set_native("llm.model", "existing", author="a", reason="r")
+    v = migrate_into(mgr, env_path=env, runtime_path=None)
+    assert v is None
+    assert len(mgr.history()) == 1
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/unit_tests/test_config_migrator.py -v`
+Expected: FAIL with `ModuleNotFoundError: contextseek.config.migrator`
+
+- [ ] **Step 3: Write minimal implementation**
+
+```python
+# src/contextseek/config/migrator.py
+"""Migrate existing ``.env`` / ``config.json`` into the managed config store.
+
+First-time adoption: the managed store is empty, so a full-rewrite materialize
+would drop keys present in ``.env`` but not tracked by ``ContextSeekSettings``.
+``import_existing`` reflects env vars back to ``section.field`` paths and parks
+untracked keys under ``_extra_env`` so the materializer re-emits them verbatim.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from contextseek.config.envreflector import env_to_section_field
+from contextseek.config.manager import ConfigManager, ConfigVersion
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        env[k.strip()] = v.strip()
+    return env
+
+
+def _set_path(nested: dict, dotted_key: str, value: Any) -> None:
+    parts = dotted_key.split(".")
+    cur = nested
+    for part in parts[:-1]:
+        cur = cur.setdefault(part, {})
+    cur[parts[-1]] = value
+
+
+def import_existing(
+    env_path: Path | None, runtime_path: Path | None
+) -> dict:
+    """Build a ``native`` payload from existing ``.env`` / ``config.json`` files."""
+    native: dict = {"_extra_env": {}}
+    reverse = env_to_section_field()
+    if env_path is not None:
+        env_path = Path(env_path)
+        if env_path.exists():
+            for key, value in _parse_env_file(env_path).items():
+                if key in reverse:
+                    section, field = reverse[key]
+                    _set_path(native, f"{section}.{field}", value)
+                else:
+                    native["_extra_env"][key] = value
+    if runtime_path is not None:
+        runtime_path = Path(runtime_path)
+        if runtime_path.exists():
+            import json
+
+            payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+            native["runtime"] = dict(payload)
+    return native
+
+
+def migrate_into(
+    manager: ConfigManager,
+    *,
+    env_path: Path | None = None,
+    runtime_path: Path | None = None,
+    author: str = "system",
+    reason: str = "migrate existing config",
+) -> ConfigVersion | None:
+    """Commit existing config as v1 (origin=migration). No-op if store non-empty."""
+    if manager.current() is not None:
+        return None
+    native = import_existing(env_path, runtime_path)
+    return manager.commit(
+        native=native,
+        origin="migration",
+        author=author,
+        reason=reason,
+    )
+```
+
+Add the `import` subcommand to `src/contextseek/config/cli.py` inside `register_config_subparser`:
+
+```python
+    p_import = sub.add_parser("import", help="import existing .env / config.json as v1")
+    p_import.add_argument("--from-env", default=None, help="path to .env (default: resolved .env)")
+    p_import.add_argument("--from-runtime", default=None, help="path to config.json (default: CONTEXTSEEK_CONFIG)")
+    p_import.add_argument("--apply", action="store_true")
+    p_import.add_argument("--author", default="system")
+```
+
+And a branch in `run_config_command`:
+
+```python
+    if cmd == "import":
+        from contextseek.config.migrator import migrate_into
+
+        env_path = Path(args.from_env) if args.from_env else None
+        rt_path = Path(args.from_runtime) if args.from_runtime else None
+        v = migrate_into(mgr, env_path=env_path, runtime_path=rt_path, author=args.author)
+        if v is None:
+            print("store already initialized; nothing to import")
+            return 0
+        print(f"imported as {v.version_id} (origin=migration)")
+        if args.apply:
+            mgr.apply(_default_materializer())
+            print("applied to .env + config.json")
+        return 0
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/unit_tests/test_config_migrator.py -v`
+Expected: PASS (all 3)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/contextseek/config/migrator.py src/contextseek/config/cli.py tests/unit_tests/test_config_migrator.py
+git commit -m "feat(config): add migrator + `config import` for first-time adoption"
+```
+
+---
+
+### Task 10: 公共 API 导出 + 文档更新
 
 **Files:**
 - Modify: `src/contextseek/config/__init__.py`
 - Modify: `README.md`（在 capabilities 表或 Quick Start 后加一行 config 管理说明）
 
 **Interfaces:**
-- Produces: `__init__.py` 导出 `ConfigManager`, `ConfigVersion`, `Materializer`, `AgentseekIngestor`。
+- Produces: `__init__.py` 导出 `ConfigManager`, `ConfigVersion`, `Materializer`, `AgentseekIngestor`, `migrate_into`。
 
 - [ ] **Step 1: Write the failing test（追加到 test_config_manager.py 或新建）**
 
@@ -1949,6 +2185,7 @@ def test_public_exports_available():
         ConfigManager,
         ConfigVersion,
         Materializer,
+        migrate_into,
     )
 ```
 
@@ -1966,6 +2203,7 @@ from contextseek.config.manager import ConfigManager
 from contextseek.config.manager import ConfigVersion
 from contextseek.config.materializer import Materializer
 from contextseek.config.agentseek_ingestor import AgentseekIngestor
+from contextseek.config.migrator import migrate_into
 ```
 
 And add these names to the `__all__` list:
@@ -1975,6 +2213,7 @@ And add these names to the `__all__` list:
     "ConfigVersion",
     "Materializer",
     "AgentseekIngestor",
+    "migrate_into",
 ```
 
 Append a short section to `README.md` (after the capabilities table):
@@ -1985,6 +2224,7 @@ Append a short section to `README.md` (after the capabilities table):
 ContextSeek ships a versioned, traceable, rollback-able configuration store:
 
 ```bash
+contextseek config import --apply          # first-time: ingest existing .env/config.json as v1
 contextseek config set llm.model gpt-4o --reason "init llm"
 contextseek config history
 contextseek config rollback v000001
@@ -2002,7 +2242,7 @@ Expected: PASS
 
 - [ ] **Step 5: Run full config test suite**
 
-Run: `pytest tests/unit_tests/test_config_envreflector.py tests/unit_tests/test_config_manager.py tests/unit_tests/test_config_materializer.py tests/unit_tests/test_config_mapping.py tests/unit_tests/test_config_agentseek_ingestor.py tests/unit_tests/test_config_cli.py tests/unit_tests/test_config_exports.py -v`
+Run: `pytest tests/unit_tests/test_config_envreflector.py tests/unit_tests/test_config_manager.py tests/unit_tests/test_config_materializer.py tests/unit_tests/test_config_mapping.py tests/unit_tests/test_config_agentseek_ingestor.py tests/unit_tests/test_config_migrator.py tests/unit_tests/test_config_cli.py tests/unit_tests/test_config_exports.py -v`
 Expected: PASS (all)
 
 - [ ] **Step 6: Commit**
@@ -2014,21 +2254,591 @@ git commit -m "feat(config): export public API and document config management"
 
 ---
 
+### Task 11: HTTP API — `/config` 重路由 + 版本管理端点 + 懒迁移
+
+**Files:**
+- Create: `src/contextseek/http/config_routes.py`
+- Modify: `src/contextseek/http/server.py`（`GET /config` 改读托管库 + 扩充字段；`PUT /config` 重路由；注册新端点）
+- Test: `tests/unit_tests/test_config_http.py`
+
+**Interfaces:**
+- Consumes: `ConfigManager` / `Materializer` / `AgentseekIngestor` / `migrate_into`；现有 `FIELD_TO_ENV`（`PUT /config` 已有的扁平字段→env 映射）；`envreflector.env_to_section_field`。
+- Produces: `def register_config_routes(app, *, config_dir: Path) -> None` 注册下列端点：
+  - `GET /config`（改写）：返回原 `Config` 扁平形状 + `config_version` / `override_sources` / `drift` / `agentseek_source_ref` / `agentseek_stale`；托管库空时先 `migrate_into` 懒迁移。
+  - `PUT /config`（重路由）：`ConfigUpdateRequest` 字段 → `FIELD_TO_ENV` → env → `(section, field)` → `ConfigManager.set_native_many` → `apply`；返回 `{status, version_id, restart_required: true}`。
+  - `GET /config/history`、`GET /config/version/{id}`、`GET /config/diff`、`GET /config/blame`、`POST /config/rollback`、`POST /config/redo`、`GET /config/status`、`GET /config/verify`、`POST /config/ingest/agentseek`。
+  - `def _manager_singleton(config_dir) -> ConfigManager`：进程内单例 + `init_store`。
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/unit_tests/test_config_http.py
+"""Tests for config-management HTTP routes."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture()
+def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("CONTEXTSEEK_HOME", str(tmp_path))
+    from contextseek.http.server import create_app
+
+    app = create_app()
+    return TestClient(app)
+
+
+def test_get_config_lazy_migrates_and_reports_version(client):
+    r = client.get("/config")
+    assert r.status_code == 200
+    body = r.json()
+    assert "config_version" in body
+    assert body["config_version"] == "v000001"  # migrated
+
+
+def test_put_config_creates_versioned_commit(client):
+    client.get("/config")  # trigger lazy migration
+    r = client.put("/config", json={"llm_model": "gpt-4o", "llm_provider": "openai"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["version_id"] == "v000002"
+    assert body["restart_required"] is True
+
+
+def test_config_history_endpoint(client):
+    client.get("/config")
+    client.put("/config", json={"llm_model": "gpt-4o"})
+    r = client.get("/config/history")
+    assert r.status_code == 200
+    versions = r.json()
+    assert isinstance(versions, list)
+    assert len(versions) >= 2
+
+
+def test_config_rollback_endpoint(client):
+    client.get("/config")
+    client.put("/config", json={"llm_model": "gpt-4o"})
+    client.put("/config", json={"llm_model": "gpt-4o-mini"})
+    r = client.post("/config/rollback", json={"version": "v000002", "reason": "back"})
+    assert r.status_code == 200
+    assert r.json()["version_id"] == "v000004"
+
+
+def test_config_status_endpoint(client):
+    client.get("/config")
+    r = client.get("/config/status")
+    assert r.status_code == 200
+    body = r.json()
+    assert "current_version" in body
+    assert "drift" in body
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/unit_tests/test_config_http.py -v`
+Expected: FAIL（新端点不存在 / `config_version` 字段缺失）
+
+- [ ] **Step 3: Write minimal implementation**
+
+Create `src/contextseek/http/config_routes.py`:
+
+```python
+"""Config-management HTTP routes (versioned store + dashboard integration)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from contextseek.config.agentseek_ingestor import AgentseekIngestor
+from contextseek.config.manager import ConfigManager
+from contextseek.config.materializer import Materializer
+from contextseek.config.migrator import migrate_into
+
+
+def _manager(config_dir: Path) -> ConfigManager:
+    mgr = ConfigManager(config_dir)
+    mgr.init_store()
+    return mgr
+
+
+def _materializer() -> Materializer:
+    import os
+
+    env_path = Path(os.environ.get("CONTEXTSEEK_ENV_FILE", ".env"))
+    runtime_path = Path(os.environ.get("CONTEXTSEEK_CONFIG", "config.json"))
+    return Materializer(env_path=env_path, runtime_path=runtime_path)
+
+
+def _ensure_migrated(mgr: ConfigManager) -> None:
+    if mgr.current() is None:
+        import os
+
+        env_path = Path(os.environ.get("CONTEXTSEEK_ENV_FILE", ".env"))
+        rt_path = Path(os.environ.get("CONTEXTSEEK_CONFIG", "config.json"))
+        migrate_into(
+            mgr,
+            env_path=env_path if env_path.exists() else None,
+            runtime_path=rt_path if rt_path.exists() else None,
+        )
+
+
+# Flat dashboard field → env var (mirrors server.py's existing FIELD_TO_ENV).
+FIELD_TO_ENV: dict[str, str] = {
+    "storage_backend": "STORAGE_BACKEND",
+    "llm_provider": "LLM_PROVIDER",
+    "llm_model": "LLM_MODEL",
+    "llm_base_url": "LLM_BASE_URL",
+    "llm_api_key": "LLM_API_KEY",
+    "embedding_provider": "EMBEDDING_PROVIDER",
+    "embedding_model": "EMBEDDING_MODEL",
+    "embedding_dims": "EMBEDDING_DIMS",
+    "embedding_base_url": "EMBEDDING_BASE_URL",
+    "embedding_api_key": "EMBEDDING_API_KEY",
+    "ob_host": "OB_HOST",
+    "ob_port": "OB_PORT",
+    "ob_db_name": "OB_DB_NAME",
+    "ob_table_name": "OB_TABLE_NAME",
+    "seekdb_host": "SEEKDB_HOST",
+    "seekdb_port": "SEEKDB_PORT",
+    "seekdb_database": "SEEKDB_DATABASE",
+    "seekdb_path": "SEEKDB_PATH",
+    "sqlite_path": "SQLITE_PATH",
+    "storage_path": "STORAGE_PATH",
+}
+
+
+def register_config_routes(app: Any, *, config_dir: Path) -> None:
+    """Register versioned config routes on ``app``."""
+    from contextseek.config.envreflector import env_to_section_field
+
+    reverse = env_to_section_field()
+
+    def _flat_field_to_dotted(field_name: str) -> str | None:
+        env = FIELD_TO_ENV.get(field_name)
+        if env is None or env not in reverse:
+            return None
+        section, field = reverse[env]
+        return f"{section}.{field}"
+
+    @app.get("/config")
+    async def get_config() -> dict[str, Any]:
+        mgr = _manager(config_dir)
+        _ensure_migrated(mgr)
+        cur = mgr.current()
+        eff = cur.payload.get("effective", {}) if cur else {}
+        # Preserve the existing flat Config shape by reading live settings for
+        # backend-specific fields, then enrich with version metadata.
+        from contextseek.http.server import _build_config_snapshot  # helper added in server.py
+
+        snapshot = _build_config_snapshot()
+        snapshot["config_version"] = cur.version_id if cur else None
+        snapshot["override_sources"] = cur.override_sources if cur else {}
+        snapshot["drift"] = mgr.status().get("drift", {"env": False, "runtime": False})
+        # agentseek source staleness
+        agentseek_ref = None
+        for v in mgr.history():
+            if v.origin == "agentseek-projection":
+                agentseek_ref = v.source_ref
+                break
+        snapshot["agentseek_source_ref"] = agentseek_ref
+        snapshot["agentseek_stale"] = agentseek_ref is None  # no projection yet
+        return snapshot
+
+    @app.put("/config")
+    async def update_config(req: dict[str, Any]) -> dict[str, Any]:
+        mgr = _manager(config_dir)
+        _ensure_migrated(mgr)
+        updates: dict[str, str] = {}
+        for field_name, val in req.items():
+            if val is None:
+                continue
+            dotted = _flat_field_to_dotted(field_name)
+            if dotted:
+                updates[dotted] = str(val)
+        if not updates:
+            return {"status": "ok", "version_id": mgr.current().version_id, "restart_required": False}
+        v = mgr.set_native_many(updates, author="dashboard", reason="dashboard edit")
+        mgr.apply(_materializer())
+        return {"status": "ok", "version_id": v.version_id, "restart_required": True}
+
+    @app.get("/config/history")
+    async def history(n: int | None = None) -> list[dict[str, Any]]:
+        mgr = _manager(config_dir)
+        return [
+            {
+                "version_id": v.version_id,
+                "parent_version_id": v.parent_version_id,
+                "created_at": v.created_at,
+                "origin": v.origin,
+                "author": v.author,
+                "reason": v.reason,
+            }
+            for v in mgr.history(n=n)
+        ]
+
+    @app.get("/config/version/{version_id}")
+    async def version_detail(version_id: str, layer: str = "effective") -> dict[str, Any]:
+        mgr = _manager(config_dir)
+        v = mgr.get_version(version_id)
+        return v.payload.get(layer, {})
+
+    @app.get("/config/diff")
+    async def diff(a: str, b: str) -> dict[str, Any]:
+        mgr = _manager(config_dir)
+        return mgr.diff(a, b)
+
+    @app.get("/config/blame")
+    async def blame(key: str) -> dict[str, Any]:
+        mgr = _manager(config_dir)
+        info = mgr.blame(key)
+        return info or {}
+
+    @app.post("/config/rollback")
+    async def rollback(req: dict[str, Any]) -> dict[str, Any]:
+        mgr = _manager(config_dir)
+        v = mgr.rollback(req["version"], author="dashboard", reason=req.get("reason", "rollback"))
+        mgr.apply(_materializer())
+        return {"version_id": v.version_id, "restart_required": True}
+
+    @app.post("/config/redo")
+    async def redo(req: dict[str, Any]) -> dict[str, Any]:
+        mgr = _manager(config_dir)
+        v = mgr.redo(author="dashboard", reason=req.get("reason", "redo"))
+        if v is None:
+            return {"version_id": None, "restart_required": False}
+        return {"version_id": v.version_id, "restart_required": True}
+
+    @app.get("/config/status")
+    async def status() -> dict[str, Any]:
+        mgr = _manager(config_dir)
+        st = mgr.status()
+        st["drift"] = _materializer().detect_drift(
+            mgr.current().payload.get("effective", {}) if mgr.current() else {}
+        )
+        st["verify_problems"] = mgr.verify()
+        return st
+
+    @app.get("/config/verify")
+    async def verify() -> dict[str, Any]:
+        mgr = _manager(config_dir)
+        problems = mgr.verify()
+        return {"ok": not problems, "problems": problems}
+
+    @app.post("/config/ingest/agentseek")
+    async def ingest_agentseek(req: dict[str, Any]) -> dict[str, Any]:
+        mgr = _manager(config_dir)
+        ing = AgentseekIngestor(mgr)
+        if req.get("path"):
+            v = ing.ingest_file(Path(req["path"]), author="dashboard")
+        else:
+            import os
+
+            v = ing.ingest_env(dict(os.environ), author="dashboard")
+        if v is None:
+            return {"version_id": None, "source_ref": None}
+        if req.get("apply"):
+            mgr.apply(_materializer())
+        return {"version_id": v.version_id, "source_ref": v.source_ref}
+```
+
+In `src/contextseek/http/server.py`:
+
+1. Extract the body of the existing `get_config` into a reusable helper `_build_config_snapshot() -> dict[str, Any]` (the part that reads `ContextSeekSettings()` and assembles the flat `Config` shape). Keep the existing `@app.get("/config")` route but have it delegate to `register_config_routes` instead — i.e. **remove** the old `get_config` / `update_config` route definitions and call `register_config_routes(app, config_dir=...)` once during app construction. Resolve `config_dir` from `${CONTEXTSEEK_HOME:-.contextseek}/config`.
+
+2. `POST /config/test` stays as-is (it does not touch the store).
+
+3. Ensure `create_app()` (or whatever the app factory is named) calls `register_config_routes(app, config_dir=Path(os.environ.get("CONTEXTSEEK_HOME", ".contextseek")) / "config")` in place of the old config route registrations.
+
+> 实现提示：`_build_config_snapshot` 即把现有 `get_config` 函数体里读 `ContextSeekSettings()` 组装扁平 dict 的部分原样提取；新 `GET /config` 在其返回上叠加版本字段。`PUT /config` 不再调用 `_update_env_file`，改为上述重路由。`_update_env_file` 保留不删（迁移兜底）。
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/unit_tests/test_config_http.py -v`
+Expected: PASS (all 5)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/contextseek/http/config_routes.py src/contextseek/http/server.py tests/unit_tests/test_config_http.py
+git commit -m "feat(config): versioned /config HTTP routes with lazy migration"
+```
+
+---
+
+### Task 12: dashboard 类型 + ctxClient 方法
+
+**Files:**
+- Modify: `dashboard/src/lib/types.ts`
+- Modify: `dashboard/src/lib/ctxClient.ts`
+
+**Interfaces:**
+- Produces（TypeScript）：
+  - `ConfigHistoryEntry`、`ConfigBlame`、`ConfigDiff`、`ConfigStatus` 接口。
+  - `ctx` 上新增：`getConfigHistory(n?)`、`getConfigVersion(id, layer?)`、`getConfigDiff(a, b)`、`getConfigBlame(key)`、`rollbackConfig(version, reason?)`、`redoConfig(reason?)`、`getConfigStatus()`、`verifyConfig()`、`ingestAgentseek(path?)`。
+  - 现有 `Config` 接口扩充可选字段：`config_version?`、`override_sources?`、`drift?`、`agentseek_source_ref?`、`agentseek_stale?`。
+
+- [ ] **Step 1: Write the failing test（类型层）**
+
+dashboard 无运行时测试设施；以 `tsc -b` 类型检查为门禁。先在 `types.ts` 末尾追加类型，在 `ctxClient.ts` 的 `ctx` 对象追加方法，然后：
+
+- [ ] **Step 2: Run tsc to verify it fails（方法未定义时调用方报错）**
+
+Run: `cd dashboard && npx tsc -b`
+Expected: FAIL（新方法尚未实现 / 调用处类型缺失）
+
+- [ ] **Step 3: Write minimal implementation**
+
+Append to `dashboard/src/lib/types.ts`:
+
+```typescript
+export interface ConfigHistoryEntry {
+  version_id: string;
+  parent_version_id: string | null;
+  created_at: string;
+  origin: string;
+  author: string;
+  reason: string;
+}
+
+export interface ConfigBlame {
+  version_id: string;
+  origin: string;
+  author: string;
+  reason: string;
+  source_ref?: string | null;
+  value: unknown;
+}
+
+export interface ConfigDiff {
+  added: string[];
+  changed: string[];
+  removed: string[];
+}
+
+export interface ConfigDrift {
+  env: boolean;
+  runtime: boolean;
+}
+
+export interface ConfigStatus {
+  current_version: string | null;
+  version_count: number;
+  store_dir: string;
+  drift: ConfigDrift;
+  verify_problems: string[];
+}
+```
+
+Extend the existing `Config` interface with optional enrichment fields:
+
+```typescript
+  config_version?: string;
+  override_sources?: Record<string, "native" | "projected:agentseek">;
+  drift?: ConfigDrift;
+  agentseek_source_ref?: string | null;
+  agentseek_stale?: boolean;
+```
+
+Append to the `ctx` object in `dashboard/src/lib/ctxClient.ts` (mirroring existing `getConfig`/`updateConfig` style):
+
+```typescript
+  getConfigHistory: (n?: number) =>
+    get<ConfigHistoryEntry[]>("/config/history", n != null ? { n: String(n) } : undefined),
+  getConfigVersion: (id: string, layer: "native" | "projected" | "effective" = "effective") =>
+    get<Record<string, unknown>>(`/config/version/${id}`, { layer }),
+  getConfigDiff: (a: string, b: string) =>
+    get<ConfigDiff>("/config/diff", { a, b }),
+  getConfigBlame: (key: string) =>
+    get<ConfigBlame>("/config/blame", { key }),
+  rollbackConfig: (version: string, reason?: string) =>
+    post<{ version_id: string; restart_required: boolean }>("/config/rollback", { version, reason }),
+  redoConfig: (reason?: string) =>
+    post<{ version_id: string | null; restart_required: boolean }>("/config/redo", { reason }),
+  getConfigStatus: () => get<ConfigStatus>("/config/status"),
+  verifyConfig: () => get<{ ok: boolean; problems: string[] }>("/config/verify"),
+  ingestAgentseek: (path?: string) =>
+    post<{ version_id: string | null; source_ref: string | null }>("/config/ingest/agentseek", { path }),
+```
+
+(Add the new type imports at the top of `ctxClient.ts` alongside existing imports.)
+
+- [ ] **Step 4: Run tsc to verify it passes**
+
+Run: `cd dashboard && npx tsc -b`
+Expected: PASS (no type errors)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add dashboard/src/lib/types.ts dashboard/src/lib/ctxClient.ts
+git commit -m "feat(dashboard): add config versioning API types and ctxClient methods"
+```
+
+---
+
+### Task 13: dashboard SettingsPanel — 内嵌版本历史区
+
+**Files:**
+- Create: `dashboard/src/panels/components/ConfigHistorySection.tsx`
+- Modify: `dashboard/src/panels/SettingsPanel.tsx`（在编辑区下方挂载历史区 + 顶部状态条 + override 徽章 + agentseek 摄入按钮）
+
+**Interfaces:**
+- Consumes: Task 12 的 `ctx` 方法与类型。
+- Produces: `ConfigHistorySection` 组件（props：无；内部拉取 `/config/history`、`/config/status`，支持展开 diff、一键 rollback、blame 弹窗）。
+
+- [ ] **Step 1: Write the failing test（类型层）**
+
+无运行时测试；以 `tsc -b` + `vite build` 为门禁。
+
+- [ ] **Step 2: Run build to verify it fails（组件未挂载 / 引用未定义）**
+
+Run: `cd dashboard && npx tsc -b`
+Expected: FAIL（`ConfigHistorySection` 不存在）
+
+- [ ] **Step 3: Write minimal implementation**
+
+Create `dashboard/src/panels/components/ConfigHistorySection.tsx`:
+
+```tsx
+import { useCallback, useEffect, useState } from "react";
+import { History, RotateCcw, GitBranch, AlertTriangle } from "lucide-react";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { ctx } from "@/lib/ctxClient";
+import { useI18n } from "@/lib/i18n";
+import type { ConfigHistoryEntry, ConfigStatus } from "@/lib/types";
+
+export function ConfigHistorySection() {
+  const { t } = useI18n();
+  const [history, setHistory] = useState<ConfigHistoryEntry[]>([]);
+  const [status, setStatus] = useState<ConfigStatus | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    const [h, s] = await Promise.all([ctx.getConfigHistory(20), ctx.getConfigStatus()]);
+    setHistory(h);
+    setStatus(s);
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const onRollback = useCallback(
+    async (version: string) => {
+      await ctx.rollbackConfig(version, "dashboard rollback");
+      await refresh();
+    },
+    [refresh],
+  );
+
+  const onIngestAgentseek = useCallback(async () => {
+    await ctx.ingestAgentseek();
+    await refresh();
+  }, [refresh]);
+
+  return (
+    <Card>
+      <CardContent className="space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <History className="h-4 w-4" />
+            <span className="font-medium">{t("config.history")}</span>
+            {status?.current_version && (
+              <Badge variant="secondary">
+                <GitBranch className="mr-1 h-3 w-3" />
+                {status.current_version}
+              </Badge>
+            )}
+            {status?.drift?.env && (
+              <Badge variant="destructive">
+                <AlertTriangle className="mr-1 h-3 w-3" />
+                drift
+              </Badge>
+            )}
+          </div>
+          <Button size="sm" variant="outline" onClick={() => void onIngestAgentseek()}>
+            {t("config.ingestAgentseek")}
+          </Button>
+        </div>
+        <ul className="space-y-1 text-sm">
+          {history.map((v) => (
+            <li key={v.version_id} className="rounded border p-2">
+              <div className="flex items-center justify-between">
+                <span>
+                  <code>{v.version_id}</code> · {v.origin} · {v.author} · {v.reason}
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setExpanded(expanded === v.version_id ? null : v.version_id)}
+                  >
+                    diff
+                  </Button>
+                  {v.version_id !== status?.current_version && (
+                    <Button size="sm" variant="outline" onClick={() => void onRollback(v.version_id)}>
+                      <RotateCcw className="mr-1 h-3 w-3" />
+                      {t("config.rollback")}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
+  );
+}
+```
+
+In `dashboard/src/panels/SettingsPanel.tsx`, render the section below the existing edit groups, and add override-source badges next to each edited field (read from `config.override_sources` returned by `getConfig`). Add the i18n keys `config.history` / `config.rollback` / `config.ingestAgentseek` to `dashboard/src/lib/i18n.tsx` (en + zh).
+
+```tsx
+// at the bottom of SettingsPanel's returned JSX, inside its container:
+<ConfigHistorySection />
+```
+
+- [ ] **Step 4: Run build to verify it passes**
+
+Run: `cd dashboard && npx tsc -b && npm run build`
+Expected: PASS (build succeeds)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add dashboard/src/panels/components/ConfigHistorySection.tsx dashboard/src/panels/SettingsPanel.tsx dashboard/src/lib/i18n.tsx
+git commit -m "feat(dashboard): inline config version history, rollback, agentseek ingest"
+```
+
+---
+
 ## Self-Review
 
 **1. Spec coverage:**
 - §1 背景/目标 → 整个计划对应。✓
 - §2 架构（物化层在上，非侵入）→ Task 4/5 Materializer + apply；现有加载器不动。✓
 - §3 数据模型（目录布局、版本文件、合并优先级、manifest）→ Task 2 `_write_version`/`_merge`/目录创建。✓
-- §4 CLI 全部命令 → Task 8 注册 show/set/apply/history/diff/rollback/redo/blame/status/verify/ingest。✓
+- §4 CLI 全部命令（含 `import`）→ Task 8 注册 show/set/apply/history/diff/rollback/redo/blame/status/verify/ingest；Task 9 追加 `import`。✓
 - §5 agentseek 摄入与映射表 → Task 6 mapping + Task 7 ingestor；幂等、source_ref、不反写。✓
-- §6 溯源与回退（append-only rollback、redo、漂移检测、blame）→ Task 3 + Task 4 `detect_drift`。✓
-- §7 错误处理（写原子性、hash 链、dry-run validate、映射冲突）→ Task 2 原子写 + Task 3 verify + Task 4 dry_run_validate + Task 2 `_merge` 不报错取 native。✓
-- §8 测试 → 每个 Task 都有对应测试文件。✓
-- §9 文件改动概览 → 全部覆盖。✓
+- §6 溯源与回退（append-only rollback、redo、漂移检测、blame、迁移）→ Task 3 + Task 4 `detect_drift` + Task 9 migrator。✓
+- §7 HTTP API（`/config` 重路由 + 扩充字段 + 新端点 + 懒迁移）→ Task 11。✓
+- §7.5 dashboard UI（内嵌历史区 + override 徽章 + 漂移/摄入）→ Task 12 类型/ctxClient + Task 13 组件。✓
+- §8 错误处理（写原子性、hash 链、dry-run validate、映射冲突、`_extra_env` 透传）→ Task 2 原子写 + Task 3 verify + Task 4 dry_run_validate + `_extra_env` + Task 2 `_merge` 不报错取 native。✓
+- §9 测试 → 每个 Task 都有对应测试文件（dashboard 以 `tsc -b`/`vite build` 为门禁）。✓
+- §10 文件改动概览 → 全部覆盖（含 http/config_routes.py、migrator.py、dashboard 文件）。✓
 
-**2. Placeholder scan:** Task 6 Step 3 有一处已明确标注的笔误需在实现时删除（占位行 + 末尾常量），已在注释中说明——这不是模糊占位而是精确修正指令。其余无 TBD/TODO。
+**2. Placeholder scan:** Task 6 Step 3 有一处已明确标注的笔误需在实现时删除（占位行 + 末尾常量），已在注释中说明——这不是模糊占位而是精确修正指令。Task 11 Step 3 引用 `server.py` 中需新增的 `_build_config_snapshot` helper，已给出明确的提取来源（现有 `get_config` 函数体），非模糊占位。其余无 TBD/TODO。
 
-**3. Type consistency:** `ConfigManager` 在 Task 2/3/5 中方法签名一致（`set_native(key, value, *, author, reason)`、`rollback(target_version_id, *, author, reason)`、`apply(materializer)`）；`ConfigVersion` 字段在 Task 2 定义后被 Task 3/7/8 一致使用；`Materializer(env_path, runtime_path)` 在 Task 4/5/8 一致；`project_agentseek_env(env) -> (projected, source_ref)` 在 Task 6/7 一致；`AgentseekIngestor(manager)` + `ingest_env`/`ingest_file` 在 Task 7/8 一致。
+**3. Type consistency:** `ConfigManager` 在 Task 2/3/5/9/11 中方法签名一致（`set_native(key, value, *, author, reason)`、`set_native_many(updates, *, author, reason)`、`rollback(target_version_id, *, author, reason)`、`apply(materializer)`、`commit(*, native, projected, origin, author, reason, source_ref)`）；`ConfigVersion` 字段在 Task 2 定义后被 Task 3/7/9/11 一致使用；`Materializer(env_path, runtime_path)` 在 Task 4/5/8/11 一致；`project_agentseek_env(env) -> (projected, source_ref)` 在 Task 6/7 一致；`AgentseekIngestor(manager)` + `ingest_env`/`ingest_file` 在 Task 7/8/11 一致；`env_to_section_field()` 在 Task 1 定义后被 Task 9（migrator）/Task 11（PUT 反演）一致使用；dashboard `ctx` 方法名在 Task 12 定义后被 Task 13 一致调用。
 
 无遗留 gap。
