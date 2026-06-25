@@ -431,3 +431,17 @@ class ConfigManager:
             "version_count": count,
             "store_dir": str(self.config_dir),
         }
+
+    # --------------------------------------------------------------- apply
+    def apply(self, materializer) -> None:  # type: ignore[no-untyped-def]
+        """Materialize the current effective config via ``materializer``.
+
+        ``materializer.materialize`` already dry-run-validates and raises
+        ``ValueError`` on invalid config without writing files, so a failed
+        apply leaves the previously materialized files intact.
+        """
+        cur = self.current()
+        if cur is None:
+            msg = "no current config version to apply"
+            raise ValueError(msg)
+        materializer.materialize(cur.payload.get("effective", {}))

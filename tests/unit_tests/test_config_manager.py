@@ -214,3 +214,26 @@ def test_status_reports_current_and_count(manager: ConfigManager):
     s = manager.status()
     assert s["current_version"] == "v000001"
     assert s["version_count"] == 1
+
+
+def test_apply_materializes_current(manager: ConfigManager, tmp_path: Path):
+    from contextseek.config.materializer import Materializer
+
+    manager.set_native("llm.model", "gpt-4o", author="a", reason="r")
+    mat = Materializer(env_path=tmp_path / ".env", runtime_path=tmp_path / "config.json")
+    manager.apply(mat)
+    assert "LLM_MODEL=gpt-4o" in (tmp_path / ".env").read_text()
+
+
+def test_apply_refuses_invalid_config(manager: ConfigManager, tmp_path: Path):
+    from contextseek.config.materializer import Materializer
+
+    # An unknown storage backend will fail RuntimeConfig/materialize validation.
+    manager.set_native("storage.backend", "not-a-real-backend", author="a", reason="bad")
+    mat = Materializer(env_path=tmp_path / ".env", runtime_path=tmp_path / "config.json")
+    import pytest
+
+    with pytest.raises(ValueError):
+        manager.apply(mat)
+    # files were not written
+    assert not (tmp_path / ".env").exists()
