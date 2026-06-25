@@ -119,7 +119,7 @@ export function WritePanel() {
           </div>
           <div className="flex flex-wrap gap-4">
             <div className="space-y-1.5">
-              <Label htmlFor="source">source</Label>
+              <Label htmlFor="source">{t("write.source")}</Label>
               <Input
                 id="source"
                 value={source}

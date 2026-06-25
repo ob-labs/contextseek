@@ -343,6 +343,12 @@ export interface Config {
   sqlite_path?: string;
   // File (storage_backend === "file")
   storage_path?: string;
+  // ---- optional enrichment fields (config versioning / AgentSeek projection) ----
+  config_version?: string;
+  override_sources?: Record<string, "native" | "projected:agentseek">;
+  drift?: ConfigDrift;
+  agentseek_source_ref?: string | null;
+  agentseek_stale?: boolean;
 }
 
 export interface ConfigUpdateRequest {
@@ -487,4 +493,57 @@ export interface SkillMdRequest {
 
 export interface SkillMdResponse {
   skills: SkillMdItem[];
+}
+
+// ---- config versioning / history ----
+
+export interface ConfigHistoryEntry {
+  version_id: string;
+  parent_version_id: string | null;
+  created_at: string;
+  origin: string;
+  author: string;
+  reason: string;
+  rollback_target_version_id?: string | null;
+}
+
+export interface ConfigHistoryPage {
+  offset: number;
+  limit: number;
+  total: number;
+  items: ConfigHistoryEntry[];
+}
+
+export interface ConfigBlame {
+  version_id: string;
+  origin: string;
+  author: string;
+  reason: string;
+  source_ref?: string | null;
+  value: unknown;
+}
+
+export interface ConfigDiff {
+  added: string[];
+  changed: string[];
+  removed: string[];
+  added_values?: Record<string, unknown>;
+  changed_values?: Record<string, { before: unknown; after: unknown }>;
+  removed_values?: Record<string, unknown>;
+}
+
+export interface ConfigDrift {
+  env: boolean;
+  runtime: boolean;
+}
+
+export interface ConfigStatus {
+  current_version: string | null;
+  version_count: number;
+  store_dir: string;
+  drift: ConfigDrift;
+  verify_problems: string[];
+  agentseek_source_ref?: string | null;
+  agentseek_stale?: boolean;
+  override_conflicts?: string[];
 }

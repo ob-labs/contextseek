@@ -19,6 +19,11 @@ from contextseek.config.settings import nested_section_config
 from contextseek.config.settings import settings_config
 from contextseek.config.settings import to_strategy_config
 from contextseek.config.factory import build_embedder, build_llm, build_summarizer
+from contextseek.config.manager import ConfigManager
+from contextseek.config.manager import ConfigVersion
+from contextseek.config.materializer import Materializer
+from contextseek.config.agentseek_ingestor import AgentseekIngestor
+from contextseek.config.migrator import migrate_into
 
 __all__ = [
     "EvolutionStrategy",
@@ -42,4 +47,9 @@ __all__ = [
     "load_runtime_config",
     "normalize_api_keys",
     "to_strategy_config",
+    "ConfigManager",
+    "ConfigVersion",
+    "Materializer",
+    "AgentseekIngestor",
+    "migrate_into",
 ]

@@ -459,6 +459,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     desktop_parser.add_argument("--log-level", default="info")
 
+    # config management
+    from contextseek.config.cli import register_config_subparser
+
+    register_config_subparser(subparsers)
+
     return parser
 
 
@@ -482,6 +487,11 @@ def run_cli(
         from contextseek.plugs.powermem.serve import run_powermem_serve
 
         return run_powermem_serve(args)
+
+    if args.command == "config":
+        from contextseek.config.cli import run_config_command
+
+        return run_config_command(args)
 
     if args.command == "plug-run":
         from contextseek.plugs.powermem.run import run_powermem_run

@@ -43,15 +43,15 @@ export function ItemCard({
             <div className="flex flex-wrap items-center gap-2">
               <StageBadge stage={item.stage} />
               <StabilityBadge stability={item.stability} />
-              {deleted && <Badge variant="destructive">deleted</Badge>}
+              {deleted && <Badge variant="destructive">{t("item.deleted")}</Badge>}
               <span className="font-mono text-xs text-muted-foreground">{item.id}</span>
             </div>
             <div className="mt-1 line-clamp-2 text-sm">
               {item.summary || item.abstract || previewContent(item.content)}
             </div>
             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-              <span>importance {item.importance.toFixed(2)}</span>
-              <span>· access {item.access_count}</span>
+              <span>{t("item.importance")} {item.importance.toFixed(2)}</span>
+              <span>· {t("item.access")} {item.access_count}</span>
               <span>· {formatTime(item.created_at)}</span>
               {item.tags.map((t) => (
                 <Badge key={t} variant="secondary" className="font-normal">
@@ -73,33 +73,33 @@ export function ItemCard({
 
       {open && (
         <div className="space-y-3 border-t bg-muted/30 p-3">
-          <Field label="content">
+          <Field label={t("item.content")}>
             <JsonView value={item.content} />
           </Field>
           {item.summary && (
-            <Field label="summary">
+            <Field label={t("item.summary")}>
               <p className="text-sm">{item.summary}</p>
             </Field>
           )}
-          <Field label="provenance">
+          <Field label={t("item.provenance")}>
             <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-              <span>source: {item.provenance.source_type}</span>
-              <span>id: {item.provenance.source_id}</span>
-              <span>confidence: {item.provenance.confidence.toFixed(2)}</span>
-              <span>verified: {String(item.provenance.verified)}</span>
+              <span>{t("item.source")}: {item.provenance.source_type}</span>
+              <span>{t("item.id")}: {item.provenance.source_id}</span>
+              <span>{t("item.confidence")}: {item.provenance.confidence.toFixed(2)}</span>
+              <span>{t("item.verified")}: {String(item.provenance.verified)}</span>
               {item.effective_confidence != null && (
-                <span>effective: {item.effective_confidence.toFixed(2)}</span>
+                <span>{t("item.effective")}: {item.effective_confidence.toFixed(2)}</span>
               )}
             </div>
           </Field>
           {item.links && item.links.length > 0 && (
-            <Field label={`links (${item.links.length})`}>
+            <Field label={`${t("item.links")} (${item.links.length})`}>
               <div className="flex flex-col gap-1">
                 {item.links.map((l, i) => (
                   <div key={`${l.target_id}-${i}`} className="flex items-center gap-2 text-xs">
                     <Badge variant="outline">{l.relation}</Badge>
                     <span className="font-mono text-muted-foreground">{l.target_id}</span>
-                    <span className="text-muted-foreground">strength {l.strength.toFixed(2)}</span>
+                    <span className="text-muted-foreground">{t("item.strength")} {l.strength.toFixed(2)}</span>
                   </div>
                 ))}
               </div>

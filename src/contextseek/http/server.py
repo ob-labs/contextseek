@@ -111,29 +111,6 @@ class SkillToolsRequest(BaseModel):
     k: int = 20
 
 
-class ConfigUpdateRequest(BaseModel):
-    llm_provider: str | None = None
-    embedding_provider: str | None = None
-    storage_backend: str | None = None
-    llm_model: str | None = None
-    llm_base_url: str | None = None
-    llm_api_key: str | None = None
-    embedding_model: str | None = None
-    embedding_dims: str | None = None
-    embedding_base_url: str | None = None
-    embedding_api_key: str | None = None
-    ob_host: str | None = None
-    ob_port: str | None = None
-    ob_db_name: str | None = None
-    ob_table_name: str | None = None
-    seekdb_host: str | None = None
-    seekdb_port: str | None = None
-    seekdb_database: str | None = None
-    seekdb_path: str | None = None
-    sqlite_path: str | None = None
-    storage_path: str | None = None
-
-
 class ConfigTestRequest(BaseModel):
     target: str
     provider: str
@@ -959,6 +936,71 @@ def _running_with_reload() -> bool:
     return "--reload" in argv
 
 
+def _build_config_snapshot() -> dict[str, Any]:
+    """Assemble the flat dashboard ``Config`` shape from live settings.
+
+    Extracted from the former in-place ``get_config`` route so the versioned
+    ``GET /config`` (registered via :func:`register_config_routes`) can layer
+    version metadata on top of the same backend-specific field set the
+    dashboard already consumes.
+    """
+    from contextseek.config.factory import resolve_embedding_dims
+    from contextseek.config.settings import (
+        ContextSeekSettings,
+        LifecycleSettings,
+    )
+
+    s = ContextSeekSettings()
+    lc = LifecycleSettings()
+    embedding_dims = resolve_embedding_dims(s.embedding)
+    result: dict[str, Any] = {
+        "storage_backend": s.storage.backend,
+        "llm_provider": s.llm.provider,
+        "llm_model": s.llm.model or s.llm.provider,
+        "llm_base_url": s.llm.base_url,
+        "llm_api_key": s.llm.kwargs.get("api_key", ""),
+        "embedding_provider": s.embedding.provider,
+        "embedding_model": s.embedding.model or s.embedding.provider,
+        "embedding_dims": str(embedding_dims) if embedding_dims else "",
+        "embedding_base_url": s.embedding.base_url,
+        "embedding_api_key": s.embedding.kwargs.get("api_key", ""),
+        "default_scope": s.default_scope,
+        "version": PACKAGE_VERSION,
+        "auto_sync": lc.auto_compact,
+        "lifecycle_interval_seconds": lc.interval_seconds,
+        "watch_paths": _parse_watch_paths(),
+    }
+    backend = s.storage.backend
+    if backend == "oceanbase":
+        from contextseek.config.settings import OceanBaseSettings
+
+        ob = OceanBaseSettings()
+        result["ob_host"] = ob.host
+        result["ob_port"] = ob.port
+        result["ob_db_name"] = ob.db_name
+        result["ob_table_name"] = ob.table_name
+    elif backend == "seekdb":
+        from contextseek.config.settings import SeekDBSettings
+
+        sdb = SeekDBSettings()
+        if sdb.host:
+            result["seekdb_mode"] = "server"
+            result["seekdb_host"] = sdb.host
+            result["seekdb_port"] = str(sdb.port)
+            result["seekdb_database"] = sdb.database
+        else:
+            result["seekdb_mode"] = "embedded"
+            result["seekdb_path"] = str(Path(sdb.path).expanduser())
+    elif backend == "sqlite":
+        from contextseek.config.settings import SQLiteSettings
+
+        sq = SQLiteSettings()
+        result["sqlite_path"] = str(Path(sq.path).expanduser())
+    elif backend == "file":
+        result["storage_path"] = str(Path(s.storage.path).expanduser())
+    return result
+
+
 def _is_desktop_runtime() -> bool:
     marker = os.environ.get("CONTEXTSEEK_DESKTOP", "").strip().lower()
     if marker in {"1", "true", "yes", "on"}:
@@ -1414,131 +1456,15 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
     async def list_scopes() -> dict[str, Any]:
         return {"scopes": ctx.list_scopes()}
 
-    @app.get("/config")
-    async def get_config() -> dict[str, Any]:
-        from contextseek.config.factory import resolve_embedding_dims
-        from contextseek.config.settings import ContextSeekSettings, LifecycleSettings
+    # Versioned /config routes (GET, PUT, history, rollback, status, ...).
+    # The old in-place get_config/update_config registrations were replaced by
+    # register_config_routes; POST /config/test stays registered below.
+    from contextseek.http.config_routes import register_config_routes
 
-        s = ContextSeekSettings()
-        lc = LifecycleSettings()
-        embedding_dims = resolve_embedding_dims(s.embedding)
-        result: dict[str, Any] = {
-            "storage_backend": s.storage.backend,
-            "llm_provider": s.llm.provider,
-            "llm_model": s.llm.model or s.llm.provider,
-            "llm_base_url": s.llm.base_url,
-            "llm_api_key": s.llm.kwargs.get("api_key", ""),
-            "embedding_provider": s.embedding.provider,
-            "embedding_model": s.embedding.model or s.embedding.provider,
-            "embedding_dims": str(embedding_dims) if embedding_dims else "",
-            "embedding_base_url": s.embedding.base_url,
-            "embedding_api_key": s.embedding.kwargs.get("api_key", ""),
-            "default_scope": s.default_scope,
-            "version": PACKAGE_VERSION,
-            "auto_sync": lc.auto_compact,
-            "lifecycle_interval_seconds": lc.interval_seconds,
-            "watch_paths": _parse_watch_paths(),
-        }
-        backend = s.storage.backend
-        if backend == "oceanbase":
-            from contextseek.config.settings import OceanBaseSettings
-
-            ob = OceanBaseSettings()
-            result["ob_host"] = ob.host
-            result["ob_port"] = ob.port
-            result["ob_db_name"] = ob.db_name
-            result["ob_table_name"] = ob.table_name
-        elif backend == "seekdb":
-            from contextseek.config.settings import SeekDBSettings
-
-            sdb = SeekDBSettings()
-            if sdb.host:
-                result["seekdb_mode"] = "server"
-                result["seekdb_host"] = sdb.host
-                result["seekdb_port"] = str(sdb.port)
-                result["seekdb_database"] = sdb.database
-            else:
-                result["seekdb_mode"] = "embedded"
-                result["seekdb_path"] = str(Path(sdb.path).expanduser())
-        elif backend == "sqlite":
-            from contextseek.config.settings import SQLiteSettings
-
-            sq = SQLiteSettings()
-            result["sqlite_path"] = str(Path(sq.path).expanduser())
-        elif backend == "file":
-            result["storage_path"] = str(Path(s.storage.path).expanduser())
-        return result
-
-    @app.put("/config")
-    async def update_config(req: ConfigUpdateRequest) -> dict[str, Any]:
-        FIELD_TO_ENV: dict[str, str] = {
-            "storage_backend": "STORAGE_BACKEND",
-            "llm_provider": "LLM_PROVIDER",
-            "llm_model": "LLM_MODEL",
-            "llm_base_url": "LLM_BASE_URL",
-            "llm_api_key": "LLM_API_KEY",
-            "embedding_provider": "EMBEDDING_PROVIDER",
-            "embedding_model": "EMBEDDING_MODEL",
-            "embedding_dims": "EMBEDDING_DIMS",
-            "embedding_base_url": "EMBEDDING_BASE_URL",
-            "embedding_api_key": "EMBEDDING_API_KEY",
-            "ob_host": "OB_HOST",
-            "ob_port": "OB_PORT",
-            "ob_db_name": "OB_DB_NAME",
-            "ob_table_name": "OB_TABLE_NAME",
-            "seekdb_host": "SEEKDB_HOST",
-            "seekdb_port": "SEEKDB_PORT",
-            "seekdb_database": "SEEKDB_DATABASE",
-            "seekdb_path": "SEEKDB_PATH",
-            "sqlite_path": "SQLITE_PATH",
-            "storage_path": "STORAGE_PATH",
-        }
-        updates: dict[str, str] = {}
-        for field_name, env_key in FIELD_TO_ENV.items():
-            val = getattr(req, field_name, None)
-            if val is not None:
-                if field_name == "embedding_dims" and val.strip() == "":
-                    val = "0"
-                updates[env_key] = val
-        if "EMBEDDING_PROVIDER" in updates or "EMBEDDING_MODEL" in updates:
-            from contextseek.config.settings import ContextSeekSettings
-
-            current = ContextSeekSettings()
-            provider = updates.get(
-                "EMBEDDING_PROVIDER", current.embedding.provider
-            ).strip()
-            model = updates.get("EMBEDDING_MODEL", current.embedding.model).strip()
-            provider_normalized = provider.lower()
-            model_normalized = model.lower()
-            if provider_normalized in {"", "none"}:
-                updates["EMBEDDING_PROVIDER"] = "none"
-                updates["EMBEDDING_MODEL"] = "none"
-                updates["EMBEDDING_DIMS"] = "0"
-                updates["EMBEDDING_BASE_URL"] = ""
-                updates["EMBEDDING_API_KEY"] = ""
-            elif model_normalized in {"", "none"}:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "EMBEDDING_MODEL must be a real model when "
-                        "EMBEDDING_PROVIDER is not none."
-                    ),
-                )
-        if not updates:
-            return {"status": "ok", "restart_required": False}
-        try:
-            _update_env_file(updates)
-        except FileNotFoundError as e:
-            raise HTTPException(status_code=500, detail=str(e)) from e
-        restart_scheduled = False
-        if _is_desktop_runtime():
-            _schedule_server_restart()
-            restart_scheduled = True
-        return {
-            "status": "ok",
-            "restart_required": not restart_scheduled,
-            "restart_scheduled": restart_scheduled,
-        }
+    register_config_routes(
+        app,
+        config_dir=Path(os.environ.get("CONTEXTSEEK_HOME", ".contextseek")) / "config",
+    )
 
     @app.post("/config/test")
     async def test_config_connection(req: ConfigTestRequest) -> dict[str, Any]:

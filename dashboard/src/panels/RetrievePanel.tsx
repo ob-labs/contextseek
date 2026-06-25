@@ -69,7 +69,7 @@ export function RetrievePanel() {
           </div>
           <div className="flex flex-wrap items-end gap-4">
             <div className="space-y-1.5">
-              <Label htmlFor="k">k</Label>
+              <Label htmlFor="k">{t("retrieve.k")}</Label>
               <Input
                 id="k"
                 type="number"
@@ -108,7 +108,7 @@ export function RetrievePanel() {
             <Textarea
               value={filtersText}
               onChange={(e) => setFiltersText(e.target.value)}
-              placeholder='{"key": "value"}'
+              placeholder={t("retrieve.filtersPlaceholder")}
               className="mt-2 font-mono text-xs"
             />
             {filterError && <p className="mt-1 text-xs text-destructive">{filterError}</p>}
