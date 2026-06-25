@@ -137,9 +137,10 @@ def project_agentseek_env(env: Mapping[str, str]) -> tuple[dict, str | None]:
 
     if not contributing:
         return projected, None
-    source_ref = "agentseek:env:sha256:" + hashlib.sha256(
-        repr(sorted(contributing)).encode("utf-8")
-    ).hexdigest()
+    source_ref = (
+        "agentseek:env:sha256:"
+        + hashlib.sha256(repr(sorted(contributing)).encode("utf-8")).hexdigest()
+    )
     return projected, source_ref
 
 

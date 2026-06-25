@@ -107,14 +107,14 @@ def register_config_subparser(subparsers: Any) -> None:
     p_set = sub.add_parser("set", help="set a native config key")
     p_set.add_argument("key", nargs="?")
     p_set.add_argument("value", nargs="?")
-    p_set.add_argument("--file", default=None, help="batch set native values from .env/.json")
+    p_set.add_argument(
+        "--file", default=None, help="batch set native values from .env/.json"
+    )
     p_set.add_argument("--reason", default="cli set")
     p_set.add_argument("--author", default="cli")
     p_set.add_argument("--no-apply", action="store_true")
 
-    sub.add_parser(
-        "apply", help="materialize current config to .env + config.json"
-    )
+    sub.add_parser("apply", help="materialize current config to .env + config.json")
 
     p_hist = sub.add_parser("history", help="list version history")
     p_hist.add_argument("-n", type=int, default=None)
@@ -150,8 +150,14 @@ def register_config_subparser(subparsers: Any) -> None:
     p_ingest_agent.add_argument("--author", default="agentseek")
 
     p_import = sub.add_parser("import", help="import existing .env / config.json as v1")
-    p_import.add_argument("--from-env", default=None, help="path to .env (default: resolved .env)")
-    p_import.add_argument("--from-runtime", default=None, help="path to config.json (default: CONTEXTSEEK_CONFIG)")
+    p_import.add_argument(
+        "--from-env", default=None, help="path to .env (default: resolved .env)"
+    )
+    p_import.add_argument(
+        "--from-runtime",
+        default=None,
+        help="path to config.json (default: CONTEXTSEEK_CONFIG)",
+    )
     p_import.add_argument("--apply", action="store_true")
     p_import.add_argument("--author", default="system")
 
@@ -197,9 +203,7 @@ def run_config_command(args: argparse.Namespace) -> int:
 
     if cmd == "history":
         for v in mgr.history(n=args.n):
-            print(
-                f"{v.version_id}  {v.created_at}  {v.origin}  {v.author}  {v.reason}"
-            )
+            print(f"{v.version_id}  {v.created_at}  {v.origin}  {v.author}  {v.reason}")
         return 0
 
     if cmd == "diff":
@@ -263,14 +267,9 @@ def run_config_command(args: argparse.Namespace) -> int:
             else:
                 v = ing.ingest_env(dict(os.environ), author=args.author)
             if v is None:
-                print(
-                    "no new agentseek config to ingest "
-                    "(idempotent skip or empty)"
-                )
+                print("no new agentseek config to ingest (idempotent skip or empty)")
                 return 0
-            print(
-                f"ingested as {v.version_id} (source_ref={v.source_ref})"
-            )
+            print(f"ingested as {v.version_id} (source_ref={v.source_ref})")
             if args.apply:
                 mgr.apply(_default_materializer())
                 print("applied to .env + config.json")
@@ -281,7 +280,9 @@ def run_config_command(args: argparse.Namespace) -> int:
 
         env_path = Path(args.from_env) if args.from_env else None
         rt_path = Path(args.from_runtime) if args.from_runtime else None
-        v = migrate_into(mgr, env_path=env_path, runtime_path=rt_path, author=args.author)
+        v = migrate_into(
+            mgr, env_path=env_path, runtime_path=rt_path, author=args.author
+        )
         if v is None:
             print("store already initialized; nothing to import")
             return 0

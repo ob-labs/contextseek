@@ -327,7 +327,9 @@ class ConfigManager:
         }
 
     # ------------------------------------------------------- rollback/redo
-    def rollback(self, target_version_id: str, *, author: str, reason: str) -> ConfigVersion:
+    def rollback(
+        self, target_version_id: str, *, author: str, reason: str
+    ) -> ConfigVersion:
         """Create a new version whose payload equals ``target_version_id``'s.
 
         Append-only: the target and any versions after it remain in history.
@@ -393,7 +395,9 @@ class ConfigManager:
             val = self._flat_get(v.payload.get("effective", {}), key)
             older = hist[i + 1] if i + 1 < len(hist) else None
             older_val = (
-                self._flat_get(older.payload.get("effective", {}), key) if older else None
+                self._flat_get(older.payload.get("effective", {}), key)
+                if older
+                else None
             )
             if val != older_val:
                 return {
@@ -461,7 +465,8 @@ class ConfigManager:
         count = 0
         if self.manifest_path.exists():
             count = sum(
-                1 for line in self.manifest_path.read_text(encoding="utf-8").splitlines()
+                1
+                for line in self.manifest_path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             )
         agentseek_ref: str | None = None
@@ -498,16 +503,22 @@ class ConfigManager:
         newest_path = self.history_dir / f"{newest['version_id']}.json"
         if not newest_path.exists():
             return
-        newest_payload = json.loads(newest_path.read_text(encoding="utf-8")).get("payload", {})
+        newest_payload = json.loads(newest_path.read_text(encoding="utf-8")).get(
+            "payload", {}
+        )
         if not self.current_path.exists():
-            self.current_path.write_text(_canonical_json(newest_payload), encoding="utf-8")
+            self.current_path.write_text(
+                _canonical_json(newest_payload), encoding="utf-8"
+            )
             return
         try:
             current_payload = json.loads(self.current_path.read_text(encoding="utf-8"))
         except Exception:
             current_payload = {}
         if _payload_hash(current_payload) != newest.get("payload_hash"):
-            self.current_path.write_text(_canonical_json(newest_payload), encoding="utf-8")
+            self.current_path.write_text(
+                _canonical_json(newest_payload), encoding="utf-8"
+            )
 
     # --------------------------------------------------------------- apply
     def apply(self, materializer) -> None:  # type: ignore[no-untyped-def]

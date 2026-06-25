@@ -69,4 +69,7 @@ def env_to_section_field(
     var (or a dashboard flat field, via ``FIELD_TO_ENV``) back into a dotted
     native path ``section.field``.
     """
-    return {env: (section, field) for section, field, env in iter_section_env_fields(settings_cls)}
+    return {
+        env: (section, field)
+        for section, field, env in iter_section_env_fields(settings_cls)
+    }

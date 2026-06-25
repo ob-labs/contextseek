@@ -38,12 +38,20 @@ def test_config_history(home: Path):
 def test_config_rollback(home: Path):
     run_cli(["config", "set", "llm.model", "gpt-4o", "--reason", "r1"])
     run_cli(["config", "set", "llm.model", "gpt-4o-mini", "--reason", "r2"])
-    manifest = (home / "config" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    manifest = (
+        (home / "config" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()
+    )
     first_id = json.loads(manifest[0])["version_id"]
     rc = run_cli(["config", "rollback", first_id, "--reason", "back"])
     assert rc == 0
-    newest = json.loads((home / "config" / "manifest.jsonl").read_text(encoding="utf-8").splitlines()[-1])
-    v3 = json.loads((home / "config" / "history" / f"{newest['version_id']}.json").read_text())
+    newest = json.loads(
+        (home / "config" / "manifest.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()[-1]
+    )
+    v3 = json.loads(
+        (home / "config" / "history" / f"{newest['version_id']}.json").read_text()
+    )
     assert v3["origin"] == "rollback"
     assert v3["payload"]["effective"]["llm"]["model"] == "gpt-4o"
 
@@ -62,7 +70,9 @@ def test_config_status(home: Path):
 
 def test_config_set_from_json_file(home: Path, tmp_path: Path):
     p = tmp_path / "updates.json"
-    p.write_text(json.dumps({"llm.model": "gpt-4.1", "llm.provider": "openai"}), encoding="utf-8")
+    p.write_text(
+        json.dumps({"llm.model": "gpt-4.1", "llm.provider": "openai"}), encoding="utf-8"
+    )
     rc = run_cli(["config", "set", "--file", str(p), "--reason", "batch"])
     assert rc == 0
     only_file = next((home / "config" / "history").glob("cfg-*.json"))

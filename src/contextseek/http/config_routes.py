@@ -219,7 +219,11 @@ def register_config_routes(app: Any, *, config_dir: Path) -> None:
 
     @app.get("/config/ingest/agentseek/check")
     async def ingest_agentseek_check() -> dict[str, Any]:
-        required = ["AGENTSEEK_API_KEY", "AGENTSEEK_MODEL", "AGENTSEEK_CTX_LLM_PROVIDER"]
+        required = [
+            "AGENTSEEK_API_KEY",
+            "AGENTSEEK_MODEL",
+            "AGENTSEEK_CTX_LLM_PROVIDER",
+        ]
         present = [k for k in required if os.environ.get(k)]
         return {
             "required": required,

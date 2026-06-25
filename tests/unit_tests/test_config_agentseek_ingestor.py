@@ -50,12 +50,18 @@ def test_ingest_env_is_idempotent(manager: ConfigManager):
 def test_ingest_env_new_source_creates_new_version(manager: ConfigManager):
     ing = AgentseekIngestor(manager)
     ing.ingest_env(
-        {"AGENTSEEK_API_KEY": "sk-1", "AGENTSEEK_MODEL": "openai:gpt-4o",
-         "AGENTSEEK_CTX_LLM_PROVIDER": "openai"}
+        {
+            "AGENTSEEK_API_KEY": "sk-1",
+            "AGENTSEEK_MODEL": "openai:gpt-4o",
+            "AGENTSEEK_CTX_LLM_PROVIDER": "openai",
+        }
     )
     v2 = ing.ingest_env(
-        {"AGENTSEEK_API_KEY": "sk-2", "AGENTSEEK_MODEL": "openai:gpt-4o",
-         "AGENTSEEK_CTX_LLM_PROVIDER": "openai"}
+        {
+            "AGENTSEEK_API_KEY": "sk-2",
+            "AGENTSEEK_MODEL": "openai:gpt-4o",
+            "AGENTSEEK_CTX_LLM_PROVIDER": "openai",
+        }
     )
     assert v2 is not None
     assert len(manager.history()) == 2

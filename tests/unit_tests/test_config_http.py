@@ -71,7 +71,9 @@ def test_config_rollback_endpoint(client):
     assert r.status_code == 200
     assert r.json()["version_id"].startswith("cfg-")
     assert r.json()["rollback_target_version_id"] == target_id
-    latest = client.get("/config/history/page", params={"offset": 0, "limit": 1}).json()["items"][0]
+    latest = client.get(
+        "/config/history/page", params={"offset": 0, "limit": 1}
+    ).json()["items"][0]
     assert latest["rollback_target_version_id"] == target_id
 
 
@@ -81,7 +83,9 @@ def test_config_redo_materializes(client, tmp_path, monkeypatch):
     r1 = client.put("/config", json={"llm_model": "gpt-4o"})
     client.put("/config", json={"llm_model": "gpt-4o-mini"})
     # rollback reverts to first edited version, and redo should re-apply newer one.
-    client.post("/config/rollback", json={"version": r1.json()["version_id"], "reason": "back"})
+    client.post(
+        "/config/rollback", json={"version": r1.json()["version_id"], "reason": "back"}
+    )
     # redo re-applies v000003's state (gpt-4o-mini), committing v000005, and
     # must materialize it — otherwise a restart would load the rolled-back .env.
     r = client.post("/config/redo", json={"reason": "undo rollback"})
@@ -147,7 +151,9 @@ def test_get_config_returns_flat_override_sources(client):
     assert body["override_sources"]["llm_model"] == "native"
 
 
-def test_ingest_agentseek_updates_status_and_sources(client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_ingest_agentseek_updates_status_and_sources(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setenv("AGENTSEEK_API_KEY", "sk-xxx")
     monkeypatch.setenv("AGENTSEEK_MODEL", "openai:gpt-4o")
     monkeypatch.setenv("AGENTSEEK_CTX_LLM_PROVIDER", "openai")
@@ -161,7 +167,9 @@ def test_ingest_agentseek_updates_status_and_sources(client, tmp_path: Path, mon
     assert sources_file.exists()
 
 
-def test_ingest_agentseek_apply_updates_env_file(client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_ingest_agentseek_apply_updates_env_file(
+    client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     monkeypatch.setenv("AGENTSEEK_API_KEY", "sk-xyz")
     monkeypatch.setenv("AGENTSEEK_MODEL", "openai:gpt-4o-mini")
     monkeypatch.setenv("AGENTSEEK_CTX_LLM_PROVIDER", "openai")

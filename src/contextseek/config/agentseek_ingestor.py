@@ -109,7 +109,9 @@ class AgentseekIngestor:
             if k.startswith(keys) or k.startswith("AGENTSEEK_CTX_")
         }
 
-    def _write_source_snapshot(self, *, source_ref: str, kind: str, raw: Mapping[str, object]) -> None:
+    def _write_source_snapshot(
+        self, *, source_ref: str, kind: str, raw: Mapping[str, object]
+    ) -> None:
         self.manager.init_store()
         target = self.manager.sources_dir / "agentseek.json"
         body = {
@@ -117,4 +119,6 @@ class AgentseekIngestor:
             "kind": kind,
             "raw": raw,
         }
-        target.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")
+        target.write_text(
+            json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
