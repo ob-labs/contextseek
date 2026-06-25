@@ -9,6 +9,7 @@ projects, and records provenance. Ingestion is idempotent: a source whose
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -46,13 +47,19 @@ class AgentseekIngestor:
             return None
         if self._is_duplicate(source_ref):
             return None
-        return self.manager.commit(
+        version = self.manager.commit(
             projected=projected,
             origin="agentseek-projection",
             author=author,
             reason=reason,
             source_ref=source_ref,
         )
+        self._write_source_snapshot(
+            source_ref=source_ref,
+            kind="env",
+            raw=self._extract_agentseek_env(env),
+        )
+        return version
 
     def ingest_file(
         self,
@@ -70,13 +77,19 @@ class AgentseekIngestor:
         source_ref = f"agentseek@{path.name}:{file_hash}"
         if self._is_duplicate(source_ref):
             return None
-        return self.manager.commit(
+        version = self.manager.commit(
             projected=projected,
             origin="agentseek-projection",
             author=author,
             reason=reason or f"ingest agentseek file {path.name}",
             source_ref=source_ref,
         )
+        self._write_source_snapshot(
+            source_ref=source_ref,
+            kind="file",
+            raw={"path": str(path), "env": env},
+        )
+        return version
 
     def _is_duplicate(self, source_ref: str) -> bool:
         """True if the latest agentseek-projection version already has this source_ref."""
@@ -86,3 +99,22 @@ class AgentseekIngestor:
             # newest-first: if we hit a non-projection version, no prior projection
             break
         return False
+
+    @staticmethod
+    def _extract_agentseek_env(env: Mapping[str, str]) -> dict[str, str]:
+        keys = ("AGENTSEEK_", "BUB_", "OPENAI_", "ANTHROPIC_", "GOOGLE_", "DEEPSEEK_")
+        return {
+            k: str(v)
+            for k, v in env.items()
+            if k.startswith(keys) or k.startswith("AGENTSEEK_CTX_")
+        }
+
+    def _write_source_snapshot(self, *, source_ref: str, kind: str, raw: Mapping[str, object]) -> None:
+        self.manager.init_store()
+        target = self.manager.sources_dir / "agentseek.json"
+        body = {
+            "source_ref": source_ref,
+            "kind": kind,
+            "raw": raw,
+        }
+        target.write_text(json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -32,6 +32,67 @@ def _manager() -> ConfigManager:
     return m
 
 
+def _set_path(nested: dict[str, Any], dotted_key: str, value: Any) -> None:
+    parts = dotted_key.split(".")
+    cur = nested
+    for part in parts[:-1]:
+        cur = cur.setdefault(part, {})
+    cur[parts[-1]] = value
+
+
+def _flatten_nested(d: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for k, v in d.items():
+        key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            out.update(_flatten_nested(v, key))
+        else:
+            out[key] = v
+    return out
+
+
+def _load_set_updates(file_path: Path) -> dict[str, Any]:
+    from contextseek.config.envreflector import env_to_section_field
+
+    path = Path(file_path)
+    if not path.exists():
+        raise ValueError(f"file not found: {path}")
+    if path.suffix.lower() == ".json":
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("JSON config must be an object")
+        # Accept both dotted-key object and nested object.
+        nested: dict[str, Any] = {}
+        for key, value in raw.items():
+            if "." in key:
+                _set_path(nested, key, value)
+            else:
+                nested[key] = value
+        return _flatten_nested(nested)
+
+    reverse = env_to_section_field()
+    updates: dict[str, Any] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        env_key, env_val = line.split("=", 1)
+        env_key = env_key.strip()
+        env_val = env_val.strip()
+        if env_key in reverse:
+            section, field = reverse[env_key]
+            updates[f"{section}.{field}"] = env_val
+            continue
+        if env_key == "LLM_API_KEY":
+            updates["llm.kwargs.api_key"] = env_val
+            continue
+        if env_key == "EMBEDDING_API_KEY":
+            updates["embedding.kwargs.api_key"] = env_val
+            continue
+        updates[f"_extra_env.{env_key}"] = env_val
+    return updates
+
+
 def register_config_subparser(subparsers: Any) -> None:
     """Register the ``config`` subcommand group on ``subparsers``."""
     parser = subparsers.add_parser("config", help="manage contextseek configuration")
@@ -44,8 +105,9 @@ def register_config_subparser(subparsers: Any) -> None:
     )
 
     p_set = sub.add_parser("set", help="set a native config key")
-    p_set.add_argument("key")
-    p_set.add_argument("value")
+    p_set.add_argument("key", nargs="?")
+    p_set.add_argument("value", nargs="?")
+    p_set.add_argument("--file", default=None, help="batch set native values from .env/.json")
     p_set.add_argument("--reason", default="cli set")
     p_set.add_argument("--author", default="cli")
     p_set.add_argument("--no-apply", action="store_true")
@@ -109,9 +171,19 @@ def run_config_command(args: argparse.Namespace) -> int:
         return 0
 
     if cmd == "set":
-        v = mgr.set_native(
-            args.key, args.value, author=args.author, reason=args.reason
-        )
+        if args.file:
+            updates = _load_set_updates(Path(args.file))
+            if not updates:
+                print("no updates found in file")
+                return 1
+            v = mgr.set_native_many(updates, author=args.author, reason=args.reason)
+        else:
+            if args.key is None or args.value is None:
+                print("set requires <key> <value> or --file")
+                return 1
+            v = mgr.set_native(
+                args.key, args.value, author=args.author, reason=args.reason
+            )
         print(f"committed {v.version_id}")
         if not args.no_apply:
             mgr.apply(_default_materializer())
@@ -164,6 +236,10 @@ def run_config_command(args: argparse.Namespace) -> int:
 
     if cmd == "status":
         st = mgr.status()
+        cur = mgr.current()
+        st["drift"] = _default_materializer().detect_drift(
+            cur.payload.get("effective", {}) if cur else {}
+        )
         st["verify_problems"] = mgr.verify()
         print(json.dumps(st, ensure_ascii=False, indent=2))
         return 0

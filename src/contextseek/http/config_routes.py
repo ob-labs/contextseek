@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from contextseek._version import __version__ as PACKAGE_VERSION
 from contextseek.config.agentseek_ingestor import AgentseekIngestor
 from contextseek.config.manager import ConfigManager
 from contextseek.config.materializer import Materializer
@@ -42,6 +43,15 @@ FIELD_TO_ENV: dict[str, str] = {
     "sqlite_path": "SQLITE_PATH",
     "storage_path": "STORAGE_PATH",
 }
+
+
+def _flat_get(d: dict[str, Any], dotted: str, default: Any = None) -> Any:
+    cur: Any = d
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return default
+        cur = cur[part]
+    return cur
 
 
 def _manager(config_dir: Path) -> ConfigManager:
@@ -103,11 +113,93 @@ def _normalize_embedding_updates(req: dict[str, Any]) -> None:
         )
 
 
+def _build_snapshot_from_effective(effective: dict[str, Any]) -> dict[str, Any]:
+    """Build dashboard ``Config`` payload from managed effective config."""
+    from contextseek.config.factory import resolve_embedding_dims
+    from contextseek.config.settings import EmbeddingSettings, LLMSettings
+
+    llm_cfg = _flat_get(effective, "llm", {}) or {}
+    emb_cfg = _flat_get(effective, "embedding", {}) or {}
+    storage_cfg = _flat_get(effective, "storage", {}) or {}
+    runtime_cfg = _flat_get(effective, "runtime", {}) or {}
+    lifecycle_cfg = _flat_get(effective, "lifecycle", {}) or {}
+
+    llm_model = str(llm_cfg.get("model", "") or "")
+    llm_provider = str(llm_cfg.get("provider", "none") or "none")
+    emb_model = str(emb_cfg.get("model", "") or "")
+    emb_provider = str(emb_cfg.get("provider", "none") or "none")
+    emb_dims_raw = emb_cfg.get("dims", 0)
+    try:
+        emb_dims = int(emb_dims_raw)
+    except (TypeError, ValueError):
+        emb_dims = 0
+    emb_dims = emb_dims or resolve_embedding_dims(EmbeddingSettings(**emb_cfg))
+
+    result: dict[str, Any] = {
+        "storage_backend": str(storage_cfg.get("backend", "sqlite")),
+        "llm_provider": llm_provider,
+        "llm_model": llm_model or llm_provider,
+        "llm_base_url": str(llm_cfg.get("base_url", "") or ""),
+        "llm_api_key": str(
+            (llm_cfg.get("kwargs", {}) or {}).get("api_key")
+            or llm_cfg.get("api_key")
+            or ""
+        ),
+        "embedding_provider": emb_provider,
+        "embedding_model": emb_model or emb_provider,
+        "embedding_dims": str(emb_dims) if emb_dims else "",
+        "embedding_base_url": str(emb_cfg.get("base_url", "") or ""),
+        "embedding_api_key": str(
+            (emb_cfg.get("kwargs", {}) or {}).get("api_key")
+            or emb_cfg.get("api_key")
+            or ""
+        ),
+        "default_scope": str(_flat_get(effective, "default_scope", "default")),
+        "version": PACKAGE_VERSION,
+        "auto_sync": bool(lifecycle_cfg.get("auto_compact", False)),
+        "lifecycle_interval_seconds": int(lifecycle_cfg.get("interval_seconds", 300)),
+        "watch_paths": _flat_get(effective, "watch.paths", []) or [],
+    }
+
+    backend = result["storage_backend"]
+    if backend == "oceanbase":
+        result["ob_host"] = str(_flat_get(effective, "ob.host", "") or "")
+        result["ob_port"] = str(_flat_get(effective, "ob.port", "") or "")
+        result["ob_db_name"] = str(_flat_get(effective, "ob.db_name", "") or "")
+        result["ob_table_name"] = str(_flat_get(effective, "ob.table_name", "") or "")
+    elif backend == "seekdb":
+        seekdb_host = str(_flat_get(effective, "seekdb.host", "") or "")
+        if seekdb_host:
+            result["seekdb_mode"] = "server"
+            result["seekdb_host"] = seekdb_host
+            result["seekdb_port"] = str(_flat_get(effective, "seekdb.port", "2881"))
+            result["seekdb_database"] = str(
+                _flat_get(effective, "seekdb.database", "contextseek")
+            )
+        else:
+            result["seekdb_mode"] = "embedded"
+            result["seekdb_path"] = str(_flat_get(effective, "seekdb.path", ""))
+    elif backend == "sqlite":
+        result["sqlite_path"] = str(_flat_get(effective, "sqlite.path", "") or "")
+    elif backend == "file":
+        result["storage_path"] = str(_flat_get(effective, "storage.path", "") or "")
+
+    # Runtime config can override backend-specific fields for non-settings keys.
+    if backend == "file" and runtime_cfg.get("storage_path"):
+        result["storage_path"] = str(runtime_cfg.get("storage_path"))
+
+    # Validate shapes for fields expected by the existing dashboard forms.
+    LLMSettings(**llm_cfg)
+    EmbeddingSettings(**emb_cfg)
+    return result
+
+
 def register_config_routes(app: Any, *, config_dir: Path) -> None:
     """Register versioned config routes on ``app``."""
     from contextseek.config.envreflector import env_to_section_field
 
     reverse = env_to_section_field()
+    dotted_to_flat: dict[str, str] = {}
 
     def _flat_field_to_dotted(field_name: str) -> str | None:
         # API keys live inside the dict-valued kwargs field — route them to the
@@ -120,29 +212,41 @@ def register_config_routes(app: Any, *, config_dir: Path) -> None:
         section, field = reverse[env]
         return f"{section}.{field}"
 
+    for field_name in FIELD_TO_ENV:
+        dotted = _flat_field_to_dotted(field_name)
+        if dotted:
+            dotted_to_flat[dotted] = field_name
+
+    @app.get("/config/ingest/agentseek/check")
+    async def ingest_agentseek_check() -> dict[str, Any]:
+        required = ["AGENTSEEK_API_KEY", "AGENTSEEK_MODEL", "AGENTSEEK_CTX_LLM_PROVIDER"]
+        present = [k for k in required if os.environ.get(k)]
+        return {
+            "required": required,
+            "present": present,
+            "missing": [k for k in required if k not in present],
+            "ready": len(present) == len(required),
+        }
+
     @app.get("/config")
     async def get_config() -> dict[str, Any]:
         mgr = _manager(config_dir)
         _ensure_migrated(mgr)
         cur = mgr.current()
-        # Preserve the existing flat Config shape by reading live settings for
-        # backend-specific fields, then enrich with version metadata.
-        from contextseek.http.server import _build_config_snapshot
-
-        snapshot = _build_config_snapshot()
+        effective = cur.payload.get("effective", {}) if cur else {}
+        snapshot = _build_snapshot_from_effective(effective)
+        flat_sources: dict[str, str] = {}
+        if cur:
+            for dotted_key, source in cur.override_sources.items():
+                flat_key = dotted_to_flat.get(dotted_key)
+                if flat_key:
+                    flat_sources[flat_key] = source
         snapshot["config_version"] = cur.version_id if cur else None
-        snapshot["override_sources"] = cur.override_sources if cur else {}
-        snapshot["drift"] = _materializer().detect_drift(
-            cur.payload.get("effective", {}) if cur else {}
-        )
-        # agentseek source staleness
-        agentseek_ref = None
-        for v in mgr.history():
-            if v.origin == "agentseek-projection":
-                agentseek_ref = v.source_ref
-                break
-        snapshot["agentseek_source_ref"] = agentseek_ref
-        snapshot["agentseek_stale"] = agentseek_ref is None  # no projection yet
+        snapshot["override_sources"] = flat_sources
+        snapshot["drift"] = _materializer().detect_drift(effective)
+        st = mgr.status()
+        snapshot["agentseek_source_ref"] = st.get("agentseek_source_ref")
+        snapshot["agentseek_stale"] = st.get("agentseek_stale", True)
         return snapshot
 
     @app.put("/config")
@@ -182,9 +286,37 @@ def register_config_routes(app: Any, *, config_dir: Path) -> None:
                 "origin": v.origin,
                 "author": v.author,
                 "reason": v.reason,
+                "rollback_target_version_id": v.rollback_target_version_id,
             }
             for v in mgr.history(n=n)
         ]
+
+    @app.get("/config/history/page")
+    async def history_page(offset: int = 0, limit: int = 20) -> dict[str, Any]:
+        mgr = _manager(config_dir)
+        if offset < 0:
+            offset = 0
+        if limit <= 0:
+            limit = 20
+        records = mgr.history()
+        page = records[offset : offset + limit]
+        return {
+            "offset": offset,
+            "limit": limit,
+            "total": len(records),
+            "items": [
+                {
+                    "version_id": v.version_id,
+                    "parent_version_id": v.parent_version_id,
+                    "created_at": v.created_at,
+                    "origin": v.origin,
+                    "author": v.author,
+                    "reason": v.reason,
+                    "rollback_target_version_id": v.rollback_target_version_id,
+                }
+                for v in page
+            ],
+        }
 
     @app.get("/config/version/{version_id}")
     async def version_detail(
@@ -212,7 +344,11 @@ def register_config_routes(app: Any, *, config_dir: Path) -> None:
             req["version"], author="dashboard", reason=req.get("reason", "rollback")
         )
         mgr.apply(_materializer())
-        return {"version_id": v.version_id, "restart_required": True}
+        return {
+            "version_id": v.version_id,
+            "restart_required": True,
+            "rollback_target_version_id": v.rollback_target_version_id,
+        }
 
     @app.post("/config/redo")
     async def redo(req: dict[str, Any]) -> dict[str, Any]:

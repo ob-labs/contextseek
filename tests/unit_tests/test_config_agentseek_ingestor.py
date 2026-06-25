@@ -71,3 +71,19 @@ def test_ingest_file_records_file_hash(manager: ConfigManager, tmp_path: Path):
     v = ing.ingest_file(cfg)
     assert v is not None
     assert "sha256:" in v.source_ref
+
+
+def test_ingest_writes_latest_source_snapshot(manager: ConfigManager):
+    ing = AgentseekIngestor(manager)
+    env = {
+        "AGENTSEEK_API_KEY": "sk-xxx",
+        "AGENTSEEK_MODEL": "openai:gpt-4o",
+        "AGENTSEEK_CTX_LLM_PROVIDER": "openai",
+    }
+    v = ing.ingest_env(env)
+    assert v is not None
+    snapshot = manager.sources_dir / "agentseek.json"
+    assert snapshot.exists()
+    body = snapshot.read_text(encoding="utf-8")
+    assert "source_ref" in body
+    assert "AGENTSEEK_API_KEY" in body

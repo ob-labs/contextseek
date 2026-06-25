@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +69,17 @@ def _merge(native: dict, projected: dict) -> tuple[dict, dict]:
     return effective, sources
 
 
+def _flat_leaf_keys(d: dict, prefix: str = "") -> set[str]:
+    out: set[str] = set()
+    for k, v in d.items():
+        key = f"{prefix}.{k}" if prefix else k
+        if isinstance(v, dict):
+            out |= _flat_leaf_keys(v, key)
+        else:
+            out.add(key)
+    return out
+
+
 @dataclass
 class ConfigVersion:
     """One snapshot in the append-only config history."""
@@ -80,6 +92,7 @@ class ConfigVersion:
     reason: str
     payload_hash: str
     source_ref: str | None = None
+    rollback_target_version_id: str | None = None
     payload: dict = field(default_factory=dict)
     diff: dict | None = None
     override_sources: dict = field(default_factory=dict)
@@ -103,6 +116,7 @@ class ConfigManager:
         self.manifest_path.touch(exist_ok=True)
         if not self.current_path.exists():
             self.current_path.write_text("{}", encoding="utf-8")
+        self._repair_current_from_manifest()
 
     # ----------------------------------------------------------------- read
     def current(self) -> ConfigVersion | None:
@@ -145,6 +159,7 @@ class ConfigManager:
             reason=raw["reason"],
             payload_hash=raw["payload_hash"],
             source_ref=raw.get("source_ref"),
+            rollback_target_version_id=raw.get("rollback_target_version_id"),
             payload=raw.get("payload", {}),
             diff=raw.get("diff"),
             override_sources=raw.get("override_sources", {}),
@@ -177,6 +192,7 @@ class ConfigManager:
         author: str,
         reason: str,
         source_ref: str | None = None,
+        rollback_target_version_id: str | None = None,
     ) -> ConfigVersion:
         """Commit a new version. ``native``/``projected`` are full new layer states.
 
@@ -206,6 +222,7 @@ class ConfigManager:
             reason=reason,
             payload_hash=_payload_hash(payload),
             source_ref=source_ref,
+            rollback_target_version_id=rollback_target_version_id,
             payload=payload,
             diff=diff,
             override_sources=sources,
@@ -221,7 +238,8 @@ class ConfigManager:
                 for line in self.manifest_path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             )
-        return f"v{count + 1:06d}"
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        return f"cfg-{ts}-{count + 1:04d}"
 
     def _write_version(self, version: ConfigVersion) -> None:
         """Atomic write: tmp → rename → manifest append → current.json update."""
@@ -237,11 +255,15 @@ class ConfigManager:
             "reason": version.reason,
             "payload_hash": version.payload_hash,
             "source_ref": version.source_ref,
+            "rollback_target_version_id": version.rollback_target_version_id,
             "payload": version.payload,
             "diff": version.diff,
             "override_sources": version.override_sources,
         }
-        tmp.write_text(_canonical_json(body), encoding="utf-8")
+        with tmp.open("w", encoding="utf-8") as fh:
+            fh.write(_canonical_json(body))
+            fh.flush()
+            os.fsync(fh.fileno())
         tmp.replace(path)
 
         manifest_record = {
@@ -253,16 +275,25 @@ class ConfigManager:
             "reason": version.reason,
             "payload_hash": version.payload_hash,
             "source_ref": version.source_ref,
+            "rollback_target_version_id": version.rollback_target_version_id,
         }
         with self.manifest_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(manifest_record, ensure_ascii=False) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
 
-        self.current_path.write_text(_canonical_json(version.payload), encoding="utf-8")
+        with self.current_path.open("w", encoding="utf-8") as fh:
+            fh.write(_canonical_json(version.payload))
+            fh.flush()
+            os.fsync(fh.fileno())
 
     # ----------------------------------------------------------------- diff
     def _diff_payloads(self, a: dict, b: dict) -> dict:
         """Compare two effective payloads, return {added, changed, removed}."""
         added, changed, removed = [], [], []
+        added_values: dict[str, Any] = {}
+        changed_values: dict[str, dict[str, Any]] = {}
+        removed_values: dict[str, Any] = {}
 
         def flat(d: dict, pre: str = "") -> dict[str, Any]:
             out: dict[str, Any] = {}
@@ -278,15 +309,21 @@ class ConfigManager:
         for k in fa:
             if k not in fb:
                 removed.append(k)
+                removed_values[k] = fa[k]
             elif fa[k] != fb[k]:
                 changed.append(k)
+                changed_values[k] = {"before": fa[k], "after": fb[k]}
         for k in fb:
             if k not in fa:
                 added.append(k)
+                added_values[k] = fb[k]
         return {
             "added": sorted(added),
             "changed": sorted(changed),
             "removed": sorted(removed),
+            "added_values": {k: added_values[k] for k in sorted(added_values)},
+            "changed_values": {k: changed_values[k] for k in sorted(changed_values)},
+            "removed_values": {k: removed_values[k] for k in sorted(removed_values)},
         }
 
     # ------------------------------------------------------- rollback/redo
@@ -302,6 +339,7 @@ class ConfigManager:
             origin="rollback",
             author=author,
             reason=reason,
+            rollback_target_version_id=target_version_id,
         )
 
     def redo(self, *, author: str, reason: str) -> ConfigVersion | None:
@@ -426,11 +464,50 @@ class ConfigManager:
                 1 for line in self.manifest_path.read_text(encoding="utf-8").splitlines()
                 if line.strip()
             )
+        agentseek_ref: str | None = None
+        for v in self.history():
+            if v.origin == "agentseek-projection":
+                agentseek_ref = v.source_ref
+                break
+        override_conflicts: list[str] = []
+        if cur is not None:
+            native_keys = _flat_leaf_keys(cur.payload.get("native", {}))
+            projected_keys = _flat_leaf_keys(cur.payload.get("projected", {}))
+            override_conflicts = sorted(native_keys & projected_keys)
         return {
             "current_version": cur.version_id if cur else None,
             "version_count": count,
             "store_dir": str(self.config_dir),
+            "agentseek_source_ref": agentseek_ref,
+            "agentseek_stale": agentseek_ref is None,
+            "override_conflicts": override_conflicts,
         }
+
+    def _repair_current_from_manifest(self) -> None:
+        """Recover ``current.json`` from manifest tail after interrupted writes."""
+        if not self.manifest_path.exists():
+            return
+        records = [
+            json.loads(line)
+            for line in self.manifest_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        if not records:
+            return
+        newest = records[-1]
+        newest_path = self.history_dir / f"{newest['version_id']}.json"
+        if not newest_path.exists():
+            return
+        newest_payload = json.loads(newest_path.read_text(encoding="utf-8")).get("payload", {})
+        if not self.current_path.exists():
+            self.current_path.write_text(_canonical_json(newest_payload), encoding="utf-8")
+            return
+        try:
+            current_payload = json.loads(self.current_path.read_text(encoding="utf-8"))
+        except Exception:
+            current_payload = {}
+        if _payload_hash(current_payload) != newest.get("payload_hash"):
+            self.current_path.write_text(_canonical_json(newest_payload), encoding="utf-8")
 
     # --------------------------------------------------------------- apply
     def apply(self, materializer) -> None:  # type: ignore[no-untyped-def]

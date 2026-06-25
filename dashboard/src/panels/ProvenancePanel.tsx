@@ -56,7 +56,7 @@ export function ProvenancePanel({ initialItemId = "" }: { initialItemId?: string
       <Card>
         <CardContent className="flex flex-wrap items-end gap-3 pt-6">
           <div className="flex-1 space-y-1.5">
-            <Label htmlFor="pv-id">item_id</Label>
+            <Label htmlFor="pv-id">{t("provenance.itemId")}</Label>
             <Input
               id="pv-id"
               value={itemId}
@@ -69,7 +69,7 @@ export function ProvenancePanel({ initialItemId = "" }: { initialItemId?: string
             />
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="pv-depth">max_depth</Label>
+            <Label htmlFor="pv-depth">{t("provenance.depth")}</Label>
             <Input
               id="pv-depth"
               type="number"

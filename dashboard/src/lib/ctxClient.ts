@@ -11,6 +11,7 @@ import type {
   ConfigBlame,
   ConfigDiff,
   ConfigHistoryEntry,
+  ConfigHistoryPage,
   ConfigStatus,
   ConfigTestRequest,
   ConfigTestResponse,
@@ -181,6 +182,8 @@ export const ctx = {
   // ---- config versioning / history ----
   getConfigHistory: (n?: number) =>
     get<ConfigHistoryEntry[]>("/config/history", n != null ? { n: String(n) } : undefined),
+  getConfigHistoryPage: (offset = 0, limit = 20) =>
+    get<ConfigHistoryPage>("/config/history/page", { offset: String(offset), limit: String(limit) }),
   getConfigVersion: (id: string, layer: "native" | "projected" | "effective" = "effective") =>
     get<Record<string, unknown>>(`/config/version/${id}`, { layer }),
   getConfigDiff: (a: string, b: string) =>
@@ -188,11 +191,17 @@ export const ctx = {
   getConfigBlame: (key: string) =>
     get<ConfigBlame>("/config/blame", { key }),
   rollbackConfig: (version: string, reason?: string) =>
-    post<{ version_id: string; restart_required: boolean }>("/config/rollback", { version, reason }),
+    post<{
+      version_id: string;
+      restart_required: boolean;
+      rollback_target_version_id?: string | null;
+    }>("/config/rollback", { version, reason }),
   redoConfig: (reason?: string) =>
     post<{ version_id: string | null; restart_required: boolean }>("/config/redo", { reason }),
   getConfigStatus: () => get<ConfigStatus>("/config/status"),
   verifyConfig: () => get<{ ok: boolean; problems: string[] }>("/config/verify"),
-  ingestAgentseek: (path?: string) =>
-    post<{ version_id: string | null; source_ref: string | null }>("/config/ingest/agentseek", { path }),
+  ingestAgentseek: (path?: string, apply = true) =>
+    post<{ version_id: string | null; source_ref: string | null }>("/config/ingest/agentseek", { path, apply }),
+  checkAgentseekIngest: () =>
+    get<{ required: string[]; present: string[]; missing: string[]; ready: boolean }>("/config/ingest/agentseek/check"),
 };

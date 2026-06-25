@@ -12,6 +12,7 @@ venv/
 .env
 .env.local
 .env.*.local
+config.json
 
 # Node / dashboard front-end
 node_modules/
@@ -51,6 +52,8 @@ htmlcov/
 .dev-pids/
 .cursor/
 .claude/
+CLAUDE.md
+.specify/
 .githooks/
 
 # ContextSeek local data

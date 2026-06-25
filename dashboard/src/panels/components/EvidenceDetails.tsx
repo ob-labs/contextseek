@@ -11,16 +11,16 @@ export function EvidenceDetails({ chain }: { chain: EvidenceChain }) {
       <Card>
         <CardContent className="space-y-3 pt-6">
           <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
-            <Metric label="overall confidence">
+            <Metric label={t("evidence.overallConfidence")}>
               <ConfidenceBar value={chain.overall_confidence} />
             </Metric>
-            <Metric label="critical path confidence">
+            <Metric label={t("evidence.criticalPathConfidence")}>
               <ConfidenceBar value={chain.critical_path_confidence} />
             </Metric>
-            <Metric label="max depth">
+            <Metric label={t("provenance.depth")}>
               <span className="font-mono text-sm">{chain.max_depth}</span>
             </Metric>
-            <Metric label="total sources">
+            <Metric label={t("evidence.totalSources")}>
               <span className="font-mono text-sm">{chain.total_sources}</span>
             </Metric>
           </div>
@@ -59,10 +59,10 @@ export function EvidenceDetails({ chain }: { chain: EvidenceChain }) {
             <table className="w-full text-left text-xs">
               <thead className="text-muted-foreground">
                 <tr>
-                  <th className="py-1 pr-4">item</th>
-                  <th className="py-1 pr-4">refuter</th>
-                  <th className="py-1 pr-4">refutation</th>
-                  <th className="py-1">net impact</th>
+                  <th className="py-1 pr-4">{t("evidence.item")}</th>
+                  <th className="py-1 pr-4">{t("evidence.refuter")}</th>
+                  <th className="py-1 pr-4">{t("evidence.refutation")}</th>
+                  <th className="py-1">{t("evidence.netImpact")}</th>
                 </tr>
               </thead>
               <tbody className="font-mono">

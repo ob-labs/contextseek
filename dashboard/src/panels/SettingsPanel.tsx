@@ -687,7 +687,7 @@ export function SettingsPanel() {
                 value={config?.llm_model ?? ""}
                 draftValue={draft.llm_model}
                 isEditing={isEditing}
-                placeholder="provider/model"
+                placeholder={t("settings.placeholder.model")}
                 overrideSource={srcFor("llm_model")}
                 onChange={(v) => setField("llm_model", v)}
               />
@@ -696,7 +696,7 @@ export function SettingsPanel() {
                 value={config?.llm_base_url ?? ""}
                 draftValue={draft.llm_base_url}
                 isEditing={isEditing}
-                placeholder="https://api.openai.com/v1"
+                placeholder={t("settings.placeholder.baseUrl")}
                 overrideSource={srcFor("llm_base_url")}
                 onChange={(v) => setField("llm_base_url", v)}
               />
@@ -706,7 +706,7 @@ export function SettingsPanel() {
                 draftValue={draft.llm_api_key}
                 isEditing={isEditing}
                 isPassword
-                placeholder="sk-..."
+                placeholder={t("settings.placeholder.apiKey")}
                 overrideSource={srcFor("llm_api_key")}
                 onChange={(v) => setField("llm_api_key", v)}
               />
@@ -738,7 +738,7 @@ export function SettingsPanel() {
                 value={config?.embedding_model ?? ""}
                 draftValue={draft.embedding_model}
                 isEditing={isEditing}
-                placeholder="provider/model"
+                placeholder={t("settings.placeholder.model")}
                 overrideSource={srcFor("embedding_model")}
                 onChange={(v) => setField("embedding_model", v)}
               />
@@ -747,7 +747,7 @@ export function SettingsPanel() {
                 value={config?.embedding_dims ?? ""}
                 draftValue={draft.embedding_dims}
                 isEditing={isEditing}
-                placeholder="auto"
+                placeholder={t("settings.placeholder.auto")}
                 overrideSource={srcFor("embedding_dims")}
                 onChange={(v) => setField("embedding_dims", v)}
               />
@@ -756,7 +756,7 @@ export function SettingsPanel() {
                 value={config?.embedding_base_url ?? ""}
                 draftValue={draft.embedding_base_url}
                 isEditing={isEditing}
-                placeholder="https://api.openai.com/v1"
+                placeholder={t("settings.placeholder.baseUrl")}
                 overrideSource={srcFor("embedding_base_url")}
                 onChange={(v) => setField("embedding_base_url", v)}
               />
@@ -766,7 +766,7 @@ export function SettingsPanel() {
                 draftValue={draft.embedding_api_key}
                 isEditing={isEditing}
                 isPassword
-                placeholder="sk-..."
+                placeholder={t("settings.placeholder.apiKey")}
                 overrideSource={srcFor("embedding_api_key")}
                 onChange={(v) => setField("embedding_api_key", v)}
               />

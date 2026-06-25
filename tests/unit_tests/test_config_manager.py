@@ -28,43 +28,46 @@ def test_init_store_creates_layout(manager: ConfigManager, tmp_path: Path):
 
 def test_set_native_creates_first_version(manager: ConfigManager):
     v = manager.set_native("llm.model", "gpt-4o", author="cli:tq", reason="init llm")
-    assert v.version_id == "v000001"
+    assert v.version_id.startswith("cfg-")
     assert v.parent_version_id is None
     assert v.origin == "manual"
     assert v.payload["native"]["llm"]["model"] == "gpt-4o"
     assert v.payload["effective"]["llm"]["model"] == "gpt-4o"
-    assert manager.current().version_id == "v000001"
+    assert manager.current().version_id == v.version_id
 
 
 def test_versions_increment_and_chain(manager: ConfigManager):
-    manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
+    v1 = manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
     v2 = manager.set_native("llm.provider", "openai", author="a", reason="r2")
-    assert v2.version_id == "v000002"
-    assert v2.parent_version_id == "v000001"
+    assert v2.version_id.startswith("cfg-")
+    assert v2.version_id != v1.version_id
+    assert v2.parent_version_id == v1.version_id
 
 
 def test_manifest_records_each_version(manager: ConfigManager, tmp_path: Path):
-    manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
-    manager.set_native("llm.provider", "openai", author="a", reason="r2")
+    v1 = manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
+    v2 = manager.set_native("llm.provider", "openai", author="a", reason="r2")
     lines = (tmp_path / "config" / "manifest.jsonl").read_text().strip().splitlines()
     assert len(lines) == 2
     rec = json.loads(lines[1])
-    assert rec["version_id"] == "v000002"
-    assert rec["parent_version_id"] == "v000001"
+    assert rec["version_id"] == v2.version_id
+    assert rec["parent_version_id"] == v1.version_id
 
 
 def test_payload_hash_matches_file(manager: ConfigManager, tmp_path: Path):
     v = manager.set_native("llm.model", "gpt-4o", author="a", reason="r")
-    raw = json.loads((tmp_path / "config" / "history" / "v000001.json").read_text())
+    raw = json.loads(
+        (tmp_path / "config" / "history" / f"{v.version_id}.json").read_text()
+    )
     assert raw["payload_hash"] == v.payload_hash
     assert raw["payload_hash"].startswith("sha256:")
 
 
 def test_history_returns_newest_first(manager: ConfigManager):
-    manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
-    manager.set_native("llm.provider", "openai", author="a", reason="r2")
+    v1 = manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
+    v2 = manager.set_native("llm.provider", "openai", author="a", reason="r2")
     hist = manager.history()
-    assert [h.version_id for h in hist] == ["v000002", "v000001"]
+    assert [h.version_id for h in hist] == [v2.version_id, v1.version_id]
 
 
 def test_merge_native_overrides_projected(manager: ConfigManager):
@@ -139,7 +142,7 @@ def test_get_version_raises_for_unknown(manager: ConfigManager):
 
     manager.set_native("llm.model", "gpt-4o", author="a", reason="r")
     with pytest.raises(KeyError):
-        manager.get_version("v999999")
+        manager.get_version("cfg-does-not-exist")
 
 
 def test_history_limit_respected(manager: ConfigManager):
@@ -149,27 +152,28 @@ def test_history_limit_respected(manager: ConfigManager):
 
 
 def test_rollback_is_append_only(manager: ConfigManager):
-    manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
-    manager.set_native("llm.model", "gpt-4o-mini", author="a", reason="r2")
-    v3 = manager.rollback("v000001", author="a", reason="rollback to v1")
-    assert v3.version_id == "v000003"
+    v1 = manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
+    v2 = manager.set_native("llm.model", "gpt-4o-mini", author="a", reason="r2")
+    v3 = manager.rollback(v1.version_id, author="a", reason="rollback to v1")
+    assert v3.version_id.startswith("cfg-")
     assert v3.origin == "rollback"
-    assert v3.parent_version_id == "v000002"
+    assert v3.parent_version_id == v2.version_id
+    assert v3.rollback_target_version_id == v1.version_id
     assert v3.payload["effective"]["llm"]["model"] == "gpt-4o"
-    # v000002 仍在历史中
+    # 被回退前的版本仍在历史中
     ids = [h.version_id for h in manager.history()]
-    assert "v000002" in ids
-    assert manager.current().version_id == "v000003"
+    assert v2.version_id in ids
+    assert manager.current().version_id == v3.version_id
 
 
 def test_redo_reverts_last_rollback(manager: ConfigManager):
-    manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
+    v1 = manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
     manager.set_native("llm.model", "gpt-4o-mini", author="a", reason="r2")
-    manager.rollback("v000001", author="a", reason="back")
+    v3 = manager.rollback(v1.version_id, author="a", reason="back")
     v4 = manager.redo(author="a", reason="undo rollback")
     assert v4 is not None
     assert v4.payload["effective"]["llm"]["model"] == "gpt-4o-mini"
-    assert v4.parent_version_id == "v000003"
+    assert v4.parent_version_id == v3.version_id
 
 
 def test_redo_returns_none_when_last_not_rollback(manager: ConfigManager):
@@ -178,20 +182,22 @@ def test_redo_returns_none_when_last_not_rollback(manager: ConfigManager):
 
 
 def test_diff_between_versions(manager: ConfigManager):
-    manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
-    manager.set_native("llm.model", "gpt-4o-mini", author="a", reason="r2")
-    d = manager.diff("v000001", "v000002")
+    v1 = manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
+    v2 = manager.set_native("llm.model", "gpt-4o-mini", author="a", reason="r2")
+    d = manager.diff(v1.version_id, v2.version_id)
     assert "llm.model" in d["changed"]
+    assert d["changed_values"]["llm.model"]["before"] == "gpt-4o"
+    assert d["changed_values"]["llm.model"]["after"] == "gpt-4o-mini"
 
 
 def test_blame_finds_last_change(manager: ConfigManager):
-    manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
-    manager.set_native("llm.provider", "openai", author="b", reason="r2")
+    v1 = manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
+    v2 = manager.set_native("llm.provider", "openai", author="b", reason="r2")
     blame = manager.blame("llm.model")
-    assert blame["version_id"] == "v000001"
+    assert blame["version_id"] == v1.version_id
     assert blame["reason"] == "r1"
     blame_provider = manager.blame("llm.provider")
-    assert blame_provider["version_id"] == "v000002"
+    assert blame_provider["version_id"] == v2.version_id
 
 
 def test_verify_passes_on_clean_store(manager: ConfigManager):
@@ -200,8 +206,8 @@ def test_verify_passes_on_clean_store(manager: ConfigManager):
 
 
 def test_verify_detects_tampered_payload(manager: ConfigManager, tmp_path: Path):
-    manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
-    path = tmp_path / "config" / "history" / "v000001.json"
+    v = manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
+    path = tmp_path / "config" / "history" / f"{v.version_id}.json"
     raw = json.loads(path.read_text())
     raw["payload"]["effective"]["llm"]["model"] = "tampered"
     path.write_text(json.dumps(raw))
@@ -210,10 +216,12 @@ def test_verify_detects_tampered_payload(manager: ConfigManager, tmp_path: Path)
 
 
 def test_status_reports_current_and_count(manager: ConfigManager):
-    manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
+    v = manager.set_native("llm.model", "gpt-4o", author="a", reason="r1")
     s = manager.status()
-    assert s["current_version"] == "v000001"
+    assert s["current_version"] == v.version_id
     assert s["version_count"] == 1
+    assert "agentseek_stale" in s
+    assert "override_conflicts" in s
 
 
 def test_apply_materializes_current(manager: ConfigManager, tmp_path: Path):
@@ -237,3 +245,29 @@ def test_apply_refuses_invalid_config(manager: ConfigManager, tmp_path: Path):
         manager.apply(mat)
     # files were not written
     assert not (tmp_path / ".env").exists()
+
+
+def test_status_reports_override_conflicts(manager: ConfigManager):
+    manager.commit(
+        projected={"llm": {"model": "projected-model"}},
+        origin="agentseek-projection",
+        author="agentseek",
+        reason="proj",
+        source_ref="agentseek@config.yml:sha256:abc",
+    )
+    manager.set_native("llm.model", "native-model", author="a", reason="override")
+    s = manager.status()
+    assert "llm.model" in s["override_conflicts"]
+    assert s["agentseek_stale"] is False
+
+
+def test_init_store_repairs_current_from_manifest_tail(tmp_path: Path):
+    m = ConfigManager(tmp_path / "config")
+    m.init_store()
+    m.set_native("llm.model", "gpt-4o", author="a", reason="r1")
+    m.set_native("llm.model", "gpt-4o-mini", author="a", reason="r2")
+    # Corrupt current.json to simulate crash window.
+    m.current_path.write_text("{}", encoding="utf-8")
+    m.init_store()
+    repaired = json.loads(m.current_path.read_text(encoding="utf-8"))
+    assert repaired["effective"]["llm"]["model"] == "gpt-4o-mini"

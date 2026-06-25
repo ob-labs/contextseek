@@ -504,6 +504,14 @@ export interface ConfigHistoryEntry {
   origin: string;
   author: string;
   reason: string;
+  rollback_target_version_id?: string | null;
+}
+
+export interface ConfigHistoryPage {
+  offset: number;
+  limit: number;
+  total: number;
+  items: ConfigHistoryEntry[];
 }
 
 export interface ConfigBlame {
@@ -519,6 +527,9 @@ export interface ConfigDiff {
   added: string[];
   changed: string[];
   removed: string[];
+  added_values?: Record<string, unknown>;
+  changed_values?: Record<string, { before: unknown; after: unknown }>;
+  removed_values?: Record<string, unknown>;
 }
 
 export interface ConfigDrift {
@@ -532,4 +543,7 @@ export interface ConfigStatus {
   store_dir: string;
   drift: ConfigDrift;
   verify_problems: string[];
+  agentseek_source_ref?: string | null;
+  agentseek_stale?: boolean;
+  override_conflicts?: string[];
 }

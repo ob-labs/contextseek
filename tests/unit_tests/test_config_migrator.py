@@ -42,7 +42,7 @@ def test_migrate_into_creates_v1_migration(tmp_path: Path):
     v = migrate_into(mgr, env_path=env, runtime_path=None)
     assert v is not None
     assert v.origin == "migration"
-    assert v.version_id == "v000001"
+    assert v.version_id.startswith("cfg-")
     assert v.payload["native"]["llm"]["model"] == "gpt-4o"
 
 

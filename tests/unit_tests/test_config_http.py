@@ -27,7 +27,7 @@ def test_get_config_lazy_migrates_and_reports_version(client):
     assert r.status_code == 200
     body = r.json()
     assert "config_version" in body
-    assert body["config_version"] == "v000001"  # migrated
+    assert body["config_version"].startswith("cfg-")  # migrated
 
 
 def test_put_config_creates_versioned_commit(client):
@@ -36,7 +36,7 @@ def test_put_config_creates_versioned_commit(client):
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok"
-    assert body["version_id"] == "v000002"
+    assert body["version_id"].startswith("cfg-")
     assert body["restart_required"] is True
 
 
@@ -50,22 +50,38 @@ def test_config_history_endpoint(client):
     assert len(versions) >= 2
 
 
-def test_config_rollback_endpoint(client):
+def test_config_history_page_endpoint(client):
     client.get("/config")
     client.put("/config", json={"llm_model": "gpt-4o"})
-    client.put("/config", json={"llm_model": "gpt-4o-mini"})
-    r = client.post("/config/rollback", json={"version": "v000002", "reason": "back"})
+    r = client.get("/config/history/page", params={"offset": 0, "limit": 1})
     assert r.status_code == 200
-    assert r.json()["version_id"] == "v000004"
+    body = r.json()
+    assert body["offset"] == 0
+    assert body["limit"] == 1
+    assert body["total"] >= 2
+    assert len(body["items"]) == 1
+
+
+def test_config_rollback_endpoint(client):
+    client.get("/config")
+    r1 = client.put("/config", json={"llm_model": "gpt-4o"})
+    client.put("/config", json={"llm_model": "gpt-4o-mini"})
+    target_id = r1.json()["version_id"]
+    r = client.post("/config/rollback", json={"version": target_id, "reason": "back"})
+    assert r.status_code == 200
+    assert r.json()["version_id"].startswith("cfg-")
+    assert r.json()["rollback_target_version_id"] == target_id
+    latest = client.get("/config/history/page", params={"offset": 0, "limit": 1}).json()["items"][0]
+    assert latest["rollback_target_version_id"] == target_id
 
 
 def test_config_redo_materializes(client, tmp_path, monkeypatch):
     # Lazy-migrate, then set + rollback + redo, assert materialized .env reflects the redo.
     client.get("/config")
-    client.put("/config", json={"llm_model": "gpt-4o"})
+    r1 = client.put("/config", json={"llm_model": "gpt-4o"})
     client.put("/config", json={"llm_model": "gpt-4o-mini"})
-    # rollback reverts to v000002 (gpt-4o), committing v000004.
-    client.post("/config/rollback", json={"version": "v000002", "reason": "back"})
+    # rollback reverts to first edited version, and redo should re-apply newer one.
+    client.post("/config/rollback", json={"version": r1.json()["version_id"], "reason": "back"})
     # redo re-applies v000003's state (gpt-4o-mini), committing v000005, and
     # must materialize it — otherwise a restart would load the rolled-back .env.
     r = client.post("/config/redo", json={"reason": "undo rollback"})
@@ -84,6 +100,8 @@ def test_config_status_endpoint(client):
     body = r.json()
     assert "current_version" in body
     assert "drift" in body
+    assert "agentseek_stale" in body
+    assert "override_conflicts" in body
 
 
 def test_put_config_preserves_api_key_round_trip(
@@ -96,16 +114,14 @@ def test_put_config_preserves_api_key_round_trip(
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "ok"
-    assert body["version_id"] == "v000002"
-    # Simulate the server restart: reload the materialized .env into os.environ
-    # so ``ContextSeekSettings()`` (read by ``_build_config_snapshot``) sees it.
+    assert body["version_id"].startswith("cfg-")
+    # Simulate a restart: GET /config should still serve from managed effective state.
     env_path = tmp_path / ".env"
     for line in env_path.read_text(encoding="utf-8").splitlines():
         if not line.strip() or "=" not in line or line.lstrip().startswith("#"):
             continue
         k, v = line.split("=", 1)
         monkeypatch.setenv(k, v)
-    # GET /config reads llm_api_key via _build_config_snapshot -> s.llm.kwargs.get("api_key")
     r2 = client.get("/config")
     assert r2.status_code == 200
     assert r2.json()["llm_api_key"] == "sk-roundtrip"
@@ -122,3 +138,46 @@ def test_get_config_reports_real_drift(client, tmp_path: Path):
     env_path.write_text(env_path.read_text() + "\n# tampered\n")
     body = client.get("/config").json()
     assert body["drift"]["env"] is True
+
+
+def test_get_config_returns_flat_override_sources(client):
+    client.get("/config")
+    client.put("/config", json={"llm_model": "gpt-4o"})
+    body = client.get("/config").json()
+    assert body["override_sources"]["llm_model"] == "native"
+
+
+def test_ingest_agentseek_updates_status_and_sources(client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("AGENTSEEK_API_KEY", "sk-xxx")
+    monkeypatch.setenv("AGENTSEEK_MODEL", "openai:gpt-4o")
+    monkeypatch.setenv("AGENTSEEK_CTX_LLM_PROVIDER", "openai")
+    r = client.post("/config/ingest/agentseek", json={})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["version_id"] is not None
+    st = client.get("/config/status").json()
+    assert st["agentseek_stale"] is False
+    sources_file = tmp_path / "config" / "sources" / "agentseek.json"
+    assert sources_file.exists()
+
+
+def test_ingest_agentseek_apply_updates_env_file(client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("AGENTSEEK_API_KEY", "sk-xyz")
+    monkeypatch.setenv("AGENTSEEK_MODEL", "openai:gpt-4o-mini")
+    monkeypatch.setenv("AGENTSEEK_CTX_LLM_PROVIDER", "openai")
+    r = client.post("/config/ingest/agentseek", json={"apply": True})
+    assert r.status_code == 200
+    env_file = tmp_path / ".env"
+    assert env_file.exists()
+    assert "LLM_MODEL=gpt-4o-mini" in env_file.read_text(encoding="utf-8")
+
+
+def test_ingest_agentseek_check_endpoint(client, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("AGENTSEEK_API_KEY", "sk-check")
+    monkeypatch.setenv("AGENTSEEK_MODEL", "openai:gpt-4o")
+    monkeypatch.setenv("AGENTSEEK_CTX_LLM_PROVIDER", "openai")
+    r = client.get("/config/ingest/agentseek/check")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ready"] is True
+    assert body["missing"] == []
