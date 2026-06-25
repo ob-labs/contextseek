@@ -9,7 +9,11 @@ from typing import Any
 
 from contextseek.client.contextseek import ContextSeek
 from contextseek.plugs.core.proxy.sdk import SDKProxyBase
-from contextseek.plugs.powermem.adapter import MEMORIES_PATH, PowerMemAdapter
+from contextseek.plugs.powermem.adapter import (
+    MEMORIES_PATH,
+    MEMORIES_SEARCH_PATH,
+    PowerMemAdapter,
+)
 from contextseek.plugs.core.protocols import PlugProxyRequest
 
 _POWERMEM_PACKAGE = "powermem"
@@ -85,7 +89,15 @@ class PowerMemMemoryProxy(SDKProxyBase):
         return result
 
     def search(self, *args, **kwargs):
-        return self._memory.search(*args, **kwargs)
+        request = self._request(
+            "SEARCH",
+            MEMORIES_SEARCH_PATH,
+            _body_from_args(args, kwargs),
+        )
+        return self._adapter.handle_contextseek_search(
+            self.contextseek_client,
+            request,
+        ).body
 
     def get_all(self, *args, **kwargs):
         return self._memory.get_all(*args, **kwargs)
@@ -168,10 +180,18 @@ def _body_from_args(
             "memory_id",
             "memory",
             "content",
+            "filters",
+            "k",
+            "limit",
             "scope",
+            "q",
+            "query",
             "user_id",
             "agent_id",
             "run_id",
+            "text",
+            "threshold",
+            "top_k",
             "infer",
         }
         and value is not None

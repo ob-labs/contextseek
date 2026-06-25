@@ -10,7 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Any
 
 from contextseek.plugs.core.protocols import (
@@ -23,6 +24,7 @@ from contextseek.plugs.core.protocols import (
     PlugProxyResponse,
     PlugProxyResult,
 )
+from contextseek.plugs.powermem.env import powermem_llm_configured
 
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,14 @@ DEFAULT_INSTANCE_ID = "default"
 DEFAULT_CONTEXTSEEK_SCOPE = "contextseek"
 MEMORIES_PATH = "/api/v1/memories"
 MEMORIES_SEARCH_PATH = "/api/v1/memories/search"
+_AUTO_INFER_CONTEXT_KEY = "powermem_auto_infer_enabled"
+_AUTO_INFER_ORIGINAL_CONTENT_KEY = "powermem_auto_infer_original_content"
+_INFER_CANDIDATE_KINDS = {
+    "session-end-transcript",
+    "post-compact-summary",
+    "compact-summary",
+    "postcompact-summary",
+}
 
 _EVENT_MAP: dict[str, PlugOperation] = {
     "ADD": "add",
@@ -176,8 +186,65 @@ class PowerMemAdapter:
             events=self.events_from_write_response(request.body, request),
         )
 
+    def prepare_write_request(self, request: PlugProxyRequest) -> PlugProxyRequest:
+        """Set PowerMem infer for hook writes according to managed LLM config."""
+        if not self._should_manage_infer(request):
+            return request
+        body = dict(request.body)
+        llm_configured = powermem_llm_configured()
+        body["infer"] = llm_configured
+        context = dict(request.context)
+        if llm_configured:
+            context[_AUTO_INFER_CONTEXT_KEY] = True
+            context[_AUTO_INFER_ORIGINAL_CONTENT_KEY] = _content_from_write_body(
+                request.body,
+            )
+        return replace(request, body=body, context=context)
+
     def handle_search(self, request: PlugProxyRequest) -> PlugProxyResponse:
         return PlugProxyResponse(body=request.body, status_code=200, headers={})
+
+    def handle_contextseek_search(
+        self,
+        client: Any,
+        request: PlugProxyRequest,
+    ) -> PlugProxyResponse:
+        response_body = self._contextseek_memory_search_body(client, request)
+        return PlugProxyResponse(body=response_body, status_code=200, headers={})
+
+    def handle_contextseek_http_search(
+        self,
+        client: Any,
+        request: PlugProxyRequest,
+    ) -> PlugProxyResponse:
+        memory_search_body = self._contextseek_memory_search_body(client, request)
+        query = _search_query_from_request(request)
+        results = [
+            _memory_search_record_to_http_result(record)
+            for record in memory_search_body.get("results", [])
+            if isinstance(record, dict)
+        ]
+        response_body = _powermem_http_search_body(
+            query=query,
+            results=results,
+        )
+        return PlugProxyResponse(body=response_body, status_code=200, headers={})
+
+    def _contextseek_memory_search_body(
+        self,
+        client: Any,
+        request: PlugProxyRequest,
+    ) -> dict[str, Any]:
+        body = request.body if isinstance(request.body, dict) else {}
+        query = _search_query_from_request(request)
+        requested_limit = _search_limit_from_request(request)
+        scope = self._scope_from_request(body)
+        if not query:
+            return {"results": [], "relations": []}
+
+        response = client.retrieve(query, scope=scope, k=requested_limit)
+        results = [_hit_to_powermem_record(hit) for hit in response.items]
+        return {"results": results}
 
     def events_from_write_response(
         self,
@@ -192,6 +259,7 @@ class PowerMemAdapter:
             request.body,
             default_operation="add",
             raw_payload={"request": request.body, "response": response_body},
+            request_context=request.context,
         )
 
     def events_from_delete_response(
@@ -243,10 +311,12 @@ class PowerMemAdapter:
         *,
         default_operation: str,
         raw_payload: dict[str, Any],
+        request_context: dict[str, Any] | None = None,
     ) -> list[PlugChangeEvent]:
         body_dict = request_body if isinstance(request_body, dict) else {}
         scope = self._scope_from_request(body_dict)
         stage_hint = self._stage_hint_from_request(body_dict)
+        request_context = request_context or {}
         events: list[PlugChangeEvent] = []
         for index, rec in enumerate(records):
             raw_event = str(rec.get("event") or default_operation).upper()
@@ -271,7 +341,12 @@ class PowerMemAdapter:
                     content=content or "",
                     scope=scope,
                     source_type=POWERMEM_SOURCE_TYPE,
-                    stage_hint=str(rec.get("stage_hint") or stage_hint),
+                    stage_hint=self._stage_hint_for_record(
+                        rec,
+                        body_dict,
+                        stage_hint,
+                        request_context,
+                    ),
                     tags=[POWERMEM_TAG],
                     metadata=self._metadata_from_request(rec, body_dict),
                     importance=self._importance_from_record(rec),
@@ -354,6 +429,49 @@ class PowerMemAdapter:
         infer = body.get("infer", True)
         return "extracted" if infer is not False else "raw"
 
+    def _stage_hint_for_record(
+        self,
+        record: dict[str, Any],
+        body: dict[str, Any],
+        default_stage_hint: str,
+        request_context: dict[str, Any],
+    ) -> str:
+        explicit = record.get("stage_hint")
+        if explicit:
+            return str(explicit)
+        if self._looks_like_auto_infer_raw_fallback(record, body, request_context):
+            return "raw"
+        return default_stage_hint
+
+    @staticmethod
+    def _looks_like_auto_infer_raw_fallback(
+        record: dict[str, Any],
+        body: dict[str, Any],
+        request_context: dict[str, Any],
+    ) -> bool:
+        if not request_context.get(_AUTO_INFER_CONTEXT_KEY):
+            return False
+        original = request_context.get(_AUTO_INFER_ORIGINAL_CONTENT_KEY)
+        if not original:
+            return False
+        record_content = PowerMemAdapter._content_from_record(record)
+        if record_content is None:
+            return False
+        return str(record_content).strip() == str(original).strip()
+
+    def _should_manage_infer(self, request: PlugProxyRequest) -> bool:
+        if request.method.upper() != "POST":
+            return False
+        if "/" + request.path.strip("/") != MEMORIES_PATH:
+            return False
+        body = request.body if isinstance(request.body, dict) else {}
+        metadata = (
+            body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+        )
+        if body.get("stage_hint") or metadata.get("stage_hint"):
+            return False
+        return _is_auto_infer_candidate(body)
+
     @staticmethod
     def _metadata_from_request(
         record: dict[str, Any],
@@ -383,3 +501,102 @@ class PowerMemAdapter:
         raw = json.dumps(rec, ensure_ascii=False, sort_keys=True, default=str)
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
         return f"result-{index}-{digest}"
+
+
+def _search_query_from_request(request: PlugProxyRequest) -> str:
+    body = request.body if isinstance(request.body, dict) else {}
+    for source in (body, request.query):
+        for key in ("query", "q", "text", "memory", "messages", "content"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if value is not None:
+                return str(value)
+    return ""
+
+
+def _search_limit_from_request(request: PlugProxyRequest) -> int:
+    body = request.body if isinstance(request.body, dict) else {}
+    for source in (body, request.query):
+        for key in ("limit", "k", "top_k"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if value is None:
+                continue
+            try:
+                return max(1, int(value))
+            except (TypeError, ValueError):
+                continue
+    return 10
+
+
+def _is_auto_infer_candidate(body: dict[str, Any]) -> bool:
+    metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+    kind = str(metadata.get("kind") or body.get("kind") or "").strip().lower()
+    if kind in _INFER_CANDIDATE_KINDS:
+        return True
+    if str(metadata.get("source") or "").strip().lower() == "claude-code-hook":
+        content = str(_content_from_write_body(body) or "")
+        lowered = content.lower()
+        return (
+            lowered.startswith("claude code session transcript")
+            or "compact summary" in lowered
+        )
+    return False
+
+
+def _content_from_write_body(body: Any) -> str | None:
+    if not isinstance(body, dict):
+        return None
+    for key in ("content", "memory", "messages", "text"):
+        value = body.get(key)
+        if value is not None:
+            return str(value)
+    return None
+
+
+def _hit_to_powermem_record(hit: Any) -> dict[str, Any]:
+    item = hit.item
+    content = item.summary or item.abstract or item.content_text
+    metadata = {
+        "scope": item.scope,
+        "stage": str(getattr(item.stage, "value", item.stage)),
+        "tags": list(item.tags),
+        "source_type": item.provenance.source_type,
+        "source_id": item.provenance.source_id,
+        "contextseek_id": item.id,
+        "contextseek_layer": hit.layer,
+        "provenance_summary": hit.provenance_summary,
+        "stage_confidence": hit.stage_confidence,
+        "recall_path": hit.recall_path,
+    }
+    return {
+        "id": item.id,
+        "memory_id": item.id,
+        "memory": content,
+        "score": hit.score,
+        "metadata": metadata,
+    }
+
+
+def _memory_search_record_to_http_result(record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "memory_id": record.get("memory_id") or record.get("id"),
+        "content": record.get("memory") or "",
+        "score": record.get("score"),
+        "metadata": record.get("metadata") or {},
+    }
+
+
+def _powermem_http_search_body(
+    *,
+    query: str,
+    results: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "success": True,
+        "data": {
+            "results": results,
+            "total": len(results),
+            "query": query,
+        },
+        "message": "Search completed successfully",
+        "timestamp": datetime.now(UTC).replace(tzinfo=None).isoformat() + "Z",
+    }

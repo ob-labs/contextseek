@@ -233,6 +233,7 @@ export interface PlugJobResponse {
   entries: PlugLinkerResult[];
   progress_current: number;
   progress_total: number;
+  progress_label?: string | null;
   result?: unknown | null;
   error?: string | null;
   created_at: string;

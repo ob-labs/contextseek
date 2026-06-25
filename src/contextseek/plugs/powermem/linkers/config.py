@@ -9,6 +9,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from contextseek.plugs.powermem.env import (
 )
 from contextseek.plugs.powermem.linkers.claude_code_plugin import (
     ClaudeCodePluginRuntimeInstaller,
+    write_claude_code_plugin_runtime_env,
 )
 from contextseek.plugs.powermem.linkers.runtime import (
     PowerMemCLIRuntimeInstaller,
@@ -120,6 +122,8 @@ class PowerMemClaudeCodeMCPConfigLinker(LifecycleLinker):
     server_name: str = "powermem"
     command_env_var: str = "CONTEXTSEEK_CLAUDE_CODE_COMMAND"
     scope_env_var: str = "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_SCOPE"
+    settings_env_var: str = "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS"
+    default_settings_path: Path = Path.home() / ".claude" / "settings.json"
     timeout: float = 30.0
 
     def install_runtime(
@@ -140,25 +144,44 @@ class PowerMemClaudeCodeMCPConfigLinker(LifecycleLinker):
     ) -> LinkerResult:
         explicit_config_path = os.environ.get(self.config_env_var, "").strip()
         if explicit_config_path:
-            return PowerMemMCPConfigLinker(
+            mcp_result = PowerMemMCPConfigLinker(
                 name=self.name,
                 target=self.target,
                 config_env_var=self.config_env_var,
                 default_config_path=Path(explicit_config_path),
                 server_name=self.server_name,
             ).configure_proxy(plug_name=plug_name, dry_run=dry_run, check=check)
+            cleanup_result = _remove_claude_code_http_env_config(
+                _path_from_env(self.settings_env_var, self.default_settings_path),
+                dry_run=dry_run,
+                check=check,
+            )
+            return merge_linker_results(
+                mcp_result,
+                cleanup_result,
+                dry_run=dry_run or check,
+            )
 
         env_result = ensure_managed_powermem_env(dry_run=dry_run, check=check)
         command = _claude_code_command(self.command_env_var)
         desired = _powermem_mcp_server_config()
         scope = os.environ.get(self.scope_env_var, "user").strip() or "user"
-        actions = env_result.actions + [
-            f"register {self.target} MCP server via Claude Code CLI: {self.server_name}",
-            f"remove existing Claude Code MCP server if present: {self.server_name}",
-            f"run claude mcp add-json --scope {scope} {self.server_name}",
-            f"route {plug_name} MCP calls through ContextSeek PowerMem proxy",
-        ]
-        warnings = list(env_result.warnings)
+        cleanup_dry_run = _remove_claude_code_http_env_config(
+            _path_from_env(self.settings_env_var, self.default_settings_path),
+            dry_run=True,
+            check=True,
+        )
+        actions = (
+            env_result.actions
+            + [
+                f"register {self.target} MCP server via Claude Code CLI: {self.server_name}",
+                f"remove existing Claude Code MCP server if present: {self.server_name}",
+                f"run claude mcp add-json --scope {scope} {self.server_name}",
+                f"route {plug_name} MCP calls through ContextSeek PowerMem proxy",
+            ]
+            + cleanup_dry_run.actions
+        )
+        warnings = list(env_result.warnings) + cleanup_dry_run.warnings
         if not _command_available(command):
             warnings.append(
                 f"{self.target} CLI cannot be found; install {self.target} or set {self.command_env_var}",
@@ -177,7 +200,7 @@ class PowerMemClaudeCodeMCPConfigLinker(LifecycleLinker):
             )
             if verify.returncode == 0:
                 return LinkerResult(
-                    changed=env_result.changed,
+                    changed=env_result.changed or cleanup_dry_run.changed,
                     dry_run=True,
                     actions=actions
                     + [f"verified {self.target} MCP server: {self.server_name}"],
@@ -239,6 +262,13 @@ class PowerMemClaudeCodeMCPConfigLinker(LifecycleLinker):
         )
         actions.extend(legacy_result.actions)
         warnings.extend(legacy_result.warnings)
+        cleanup_result = _remove_claude_code_http_env_config(
+            _path_from_env(self.settings_env_var, self.default_settings_path),
+            dry_run=False,
+            check=False,
+        )
+        actions.extend(cleanup_result.actions)
+        warnings.extend(cleanup_result.warnings)
 
         verify = _run_command(
             [*command, "mcp", "get", self.server_name],
@@ -437,6 +467,15 @@ class PowerMemCodexConfigLinker(LifecycleLinker):
             section=section,
         )
         config_changed = after != before
+        if (
+            check
+            and config_changed
+            and _has_codex_contextseek_mcp_server(
+                before,
+                self.server_name,
+            )
+        ):
+            config_changed = False
         changed = env_result.changed or config_changed
         actions = env_result.actions + [
             f"write {self.target} config.toml: {path}",
@@ -529,6 +568,8 @@ class PowerMemClaudeCodeHTTPConfigLinker(LifecycleLinker):
     server_name: str = "powermem"
     plugin_name_env_var: str = "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN"
     plugin_scope_env_var: str = "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_SCOPE"
+    command_env_var: str = "CONTEXTSEEK_CLAUDE_CODE_COMMAND"
+    timeout: float = 10.0
 
     def install_runtime(
         self,
@@ -577,12 +618,26 @@ class PowerMemClaudeCodeHTTPConfigLinker(LifecycleLinker):
         proxy_url = _contextseek_powermem_proxy_url()
         settings_after = dict(settings_before)
         env = dict(settings_after.get("env") or {})
-        env["POWERMEM_BASE_URL"] = proxy_url
+        env.pop("POWERMEM_BASE_URL", None)
         env.setdefault("POWERMEM_AGENT_ID", "claude-code")
         settings_after["env"] = env
+        runtime_env_path, runtime_env_changed = write_claude_code_plugin_runtime_env(
+            proxy_url,
+            agent_id=str(env.get("POWERMEM_AGENT_ID") or "claude-code"),
+            dry_run=dry_run,
+            check=check,
+        )
 
         settings_changed = settings_after != settings_before and len(warnings) == len(
             env_result.warnings
+        )
+        cli_cleanup_result = _remove_claude_code_user_mcp_server(
+            target=self.target,
+            command_env_var=self.command_env_var,
+            server_name=self.server_name,
+            dry_run=dry_run,
+            check=check,
+            timeout=self.timeout,
         )
         mcp_path = _path_from_env(self.mcp_config_env_var, self.mcp_default_config_path)
         mcp_changed = False
@@ -601,14 +656,27 @@ class PowerMemClaudeCodeHTTPConfigLinker(LifecycleLinker):
                     mcp_servers.pop(self.server_name, None)
                     mcp_changed = True
 
-        changed = env_result.changed or settings_changed or mcp_changed
-        actions = env_result.actions + [
-            f"write {self.target} settings env: {path}",
-            f"set env.POWERMEM_BASE_URL={proxy_url}",
-            "set default env.POWERMEM_AGENT_ID=claude-code",
-            f"remove mcpServers.{self.server_name} from {mcp_path} when present",
-            f"route {plug_name} HTTP hooks through ContextSeek PowerMem proxy",
-        ]
+        changed = (
+            env_result.changed
+            or settings_changed
+            or runtime_env_changed
+            or mcp_changed
+            or cli_cleanup_result.changed
+        )
+        actions = (
+            env_result.actions
+            + [
+                f"write {self.target} settings env: {path}",
+                "remove stale env.POWERMEM_BASE_URL from Claude Code settings",
+                "set default env.POWERMEM_AGENT_ID=claude-code",
+                f"write PowerMem Claude Code runtime env: {runtime_env_path}",
+                f"set runtime POWERMEM_BASE_URL={proxy_url}",
+                f"remove mcpServers.{self.server_name} from {mcp_path} when present",
+                f"route {plug_name} HTTP hooks through ContextSeek PowerMem proxy",
+            ]
+            + cli_cleanup_result.actions
+        )
+        warnings.extend(cli_cleanup_result.warnings)
         if check or dry_run:
             return LinkerResult(
                 changed=changed,
@@ -992,11 +1060,145 @@ def _remove_legacy_claude_code_mcp_config(
     )
 
 
+def _remove_claude_code_http_env_config(
+    settings_path: Path,
+    *,
+    dry_run: bool,
+    check: bool,
+) -> LinkerResult:
+    path = settings_path.expanduser()
+    if not path.is_file():
+        return LinkerResult(changed=False, dry_run=dry_run or check)
+    before_text = _read_text(path)
+    before = _read_jsonc(path)
+    if before is None:
+        return LinkerResult(
+            changed=False,
+            dry_run=dry_run or check,
+            warnings=[
+                f"skip cleaning {path}: existing Claude Code settings are not valid JSON/JSONC",
+            ],
+        )
+    env = dict(before.get("env") or {})
+    removed = [key for key in ("POWERMEM_BASE_URL", "POWERMEM_AGENT_ID") if key in env]
+    if not removed:
+        return LinkerResult(changed=False, dry_run=dry_run or check)
+    for key in removed:
+        env.pop(key, None)
+    actions = [
+        f"remove Claude Code HTTP hook env from {path}: {', '.join(removed)}",
+    ]
+    if dry_run or check:
+        return LinkerResult(changed=True, dry_run=True, actions=actions)
+    _write_jsonc_top_level_entry(path, before_text, key="env", value=env)
+    return LinkerResult(changed=True, dry_run=False, actions=actions)
+
+
+def _remove_claude_code_user_mcp_server(
+    *,
+    target: str,
+    command_env_var: str,
+    server_name: str,
+    dry_run: bool,
+    check: bool,
+    timeout: float,
+) -> LinkerResult:
+    command = _claude_code_command(command_env_var)
+    actions = [
+        f"remove {target} user MCP server if present: {server_name}",
+    ]
+    if check:
+        return LinkerResult(changed=False, dry_run=True, actions=actions)
+    if dry_run:
+        return LinkerResult(changed=False, dry_run=True, actions=actions)
+    if not _command_available(command):
+        return LinkerResult(
+            changed=False,
+            dry_run=False,
+            actions=actions
+            + [
+                f"skip {target} user MCP cleanup: CLI cannot be found",
+            ],
+        )
+    result = _run_command(
+        [
+            *command,
+            "mcp",
+            "remove",
+            "--scope",
+            "user",
+            server_name,
+        ],
+        timeout=timeout,
+    )
+    if result.returncode == 0:
+        return LinkerResult(
+            changed=True,
+            dry_run=False,
+            actions=actions + [f"removed {target} user MCP server: {server_name}"],
+        )
+    if _looks_like_missing_mcp_server(result.output):
+        return LinkerResult(
+            changed=False,
+            dry_run=False,
+            actions=actions + [f"{target} user MCP server not found: {server_name}"],
+        )
+    return LinkerResult(
+        changed=False,
+        dry_run=False,
+        actions=actions,
+        warnings=[
+            f"failed to remove {target} user MCP server {server_name}: "
+            + _short_command_output(result),
+        ],
+    )
+
+
 def _is_contextseek_mcp_server(server: Any) -> bool:
     if not isinstance(server, dict):
         return False
     command = str(server.get("command") or "")
     return Path(command).name == "contextseek-pmem-mcp-stdio"
+
+
+def _has_codex_contextseek_mcp_server(text: str, server_name: str) -> bool:
+    try:
+        payload = tomllib.loads(text or "")
+    except tomllib.TOMLDecodeError:
+        return False
+    servers = payload.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return False
+    server = servers.get(server_name)
+    if not _is_contextseek_mcp_server(server):
+        return False
+    env = server.get("env") if isinstance(server, dict) else None
+    if not isinstance(env, dict):
+        return False
+    return all(
+        str(env.get(key) or "").strip()
+        for key in (
+            "CONTEXTSEEK_POWERMEM_ENV_FILE",
+            "CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE",
+        )
+    )
+
+
+def _looks_like_missing_mcp_server(output: str) -> bool:
+    text = output.lower()
+    if re.search(r"\bno\b.*\bmcp server found\b", text):
+        return True
+    return any(
+        marker in text
+        for marker in (
+            "not found",
+            "not exist",
+            "does not exist",
+            "no mcp server",
+            "no server",
+            "unknown server",
+        )
+    )
 
 
 def _command_available(command: list[str]) -> bool:
@@ -1702,7 +1904,10 @@ def _powermem_mcp_env() -> dict[str, str]:
     }
     env.update(_contextseek_mcp_env())
     for key in (
+        "CONTEXTSEEK_DESKTOP",
         "CONTEXTSEEK_POWERMEM_RUNTIME_DIR",
+        "CONTEXTSEEK_POWERMEM_RUNTIME_MODE",
+        "CONTEXTSEEK_POWERMEM_RELEASE_BINARY_DIR",
         "CONTEXTSEEK_POWERMEM_PACKAGE_INSTALL_STRATEGY",
         "CONTEXTSEEK_POWERMEM_MCP_BACKEND_COMMAND",
     ):

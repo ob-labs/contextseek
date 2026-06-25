@@ -134,6 +134,51 @@ class TestToStrategyConfig:
         assert config.write.acl_enabled is True
         assert config.lifecycle.auto_compact is True
 
+    def test_embedding_enables_vector_recall_by_default(self):
+        """Embedding config opts default retrieval into vector recall."""
+        settings = ContextSeekSettings(
+            embedding=EmbeddingSettings(
+                provider="langchain",
+                class_path="langchain_openai.OpenAIEmbeddings",
+                model="text-embedding-3-small",
+                dims=1536,
+            ),
+        )
+        config = to_strategy_config(settings)
+        assert config.retrieval.recall_routes == ("phrase", "terms", "vector")
+
+    def test_explicit_recall_routes_are_preserved_with_embedding(self):
+        """Explicit recall routes remain an override even when embedding exists."""
+        settings = ContextSeekSettings(
+            embedding=EmbeddingSettings(
+                provider="langchain",
+                class_path="langchain_openai.OpenAIEmbeddings",
+                model="text-embedding-3-small",
+                dims=1536,
+            ),
+            retrieval=RetrievalSettings(recall_routes=["phrase"]),
+        )
+        config = to_strategy_config(settings)
+        assert config.retrieval.recall_routes == ("phrase",)
+
+    def test_vector_recall_is_removed_without_embedding(self):
+        """Vector recall is disabled when embedding is not configured."""
+        settings = ContextSeekSettings(
+            embedding=EmbeddingSettings(provider="none"),
+            retrieval=RetrievalSettings(recall_routes=["phrase", "vector"]),
+        )
+        config = to_strategy_config(settings)
+        assert config.retrieval.recall_routes == ("phrase",)
+
+    def test_vector_only_recall_falls_back_without_embedding(self):
+        """Vector-only config degrades to text recall when embedding is off."""
+        settings = ContextSeekSettings(
+            embedding=EmbeddingSettings(provider="none"),
+            retrieval=RetrievalSettings(recall_routes=["vector"]),
+        )
+        config = to_strategy_config(settings)
+        assert config.retrieval.recall_routes == ("phrase", "terms")
+
     def test_custom_values_transfer(self):
         """Custom settings values transfer to StrategyConfig."""
         settings = ContextSeekSettings(

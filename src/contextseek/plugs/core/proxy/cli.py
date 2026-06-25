@@ -55,12 +55,14 @@ def resolve_executable(
     *,
     env_names: list[str],
     fallback: str,
+    env: dict[str, str] | None = None,
 ) -> str | None:
+    values = env or os.environ
     for name in env_names:
-        value = os.environ.get(name)
+        value = values.get(name)
         if value:
             return value
-    return shutil.which(fallback)
+    return shutil.which(fallback, path=values.get("PATH"))
 
 
 def materialize_cli_events(

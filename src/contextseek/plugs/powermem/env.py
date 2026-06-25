@@ -57,6 +57,21 @@ _POWERMEM_CHILD_ENV_ISOLATION_KEYS = {
     "EMBEDDING_KWARGS",
     "EMBEDDING_BASE_URL",
 }
+_PROXY_ENV_KEYS = (
+    "ALL_PROXY",
+    "all_proxy",
+    "HTTP_PROXY",
+    "http_proxy",
+    "HTTPS_PROXY",
+    "https_proxy",
+)
+_SOCKS_PROXY_SCHEMES = (
+    "socks://",
+    "socks4://",
+    "socks4a://",
+    "socks5://",
+    "socks5h://",
+)
 
 
 @dataclass(frozen=True)
@@ -92,10 +107,18 @@ def powermem_child_process_env(base: Mapping[str, str] | None = None) -> dict[st
     managed_values = read_env_file(env_file)
     for key in managed_values.keys() | _POWERMEM_CHILD_ENV_ISOLATION_KEYS:
         env.pop(key, None)
+    for key in _PROXY_ENV_KEYS:
+        if _is_socks_proxy_value(env.get(key, "")):
+            env.pop(key, None)
     env.update(managed_values)
     env["POWERMEM_ENV_FILE"] = str(env_file)
     env.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")
     return env
+
+
+def _is_socks_proxy_value(value: str) -> bool:
+    normalized = value.strip().lower()
+    return normalized.startswith(_SOCKS_PROXY_SCHEMES)
 
 
 def powermem_child_process_cwd() -> Path:
@@ -124,12 +147,14 @@ def ensure_managed_powermem_env(
         defaults.update(
             {key: value for key, value in extra_defaults.items() if value != ""}
         )
+    upgrades = _managed_env_default_upgrades(existing, defaults)
     additions = {
         key: value
         for key, value in defaults.items()
         if key not in existing and value != ""
     }
-    changed = bool(additions) or not path.exists()
+    changes = {**additions, **upgrades}
+    changed = bool(changes) or not path.exists()
     actions = [
         f"prepare managed PowerMem env: {path}",
     ]
@@ -137,8 +162,13 @@ def ensure_managed_powermem_env(
         actions.append(
             "fill PowerMem env from ContextSeek env: " + ", ".join(sorted(additions)),
         )
+    if upgrades:
+        actions.append(
+            "upgrade PowerMem env defaults from ContextSeek env: "
+            + ", ".join(sorted(upgrades)),
+        )
 
-    merged = {**defaults, **existing}
+    merged = {**defaults, **existing, **upgrades}
     warnings = manual_field_warnings(merged, raw=raw)
     if check or dry_run:
         return PowerMemEnvResult(
@@ -150,7 +180,7 @@ def ensure_managed_powermem_env(
         )
 
     if changed:
-        _write_env_preserving_existing(path, additions)
+        _write_env_preserving_existing(path, changes)
     return PowerMemEnvResult(
         changed=changed,
         dry_run=False,
@@ -158,6 +188,59 @@ def ensure_managed_powermem_env(
         actions=actions,
         warnings=warnings,
     )
+
+
+def _managed_env_default_upgrades(
+    existing: Mapping[str, str],
+    defaults: Mapping[str, str],
+) -> dict[str, str]:
+    """Upgrade generated placeholder values when real defaults become available."""
+    if not _should_upgrade_provider(
+        existing.get("EMBEDDING_PROVIDER", ""),
+        defaults.get("EMBEDDING_PROVIDER", ""),
+    ):
+        return {}
+
+    upgrade_keys = {
+        "EMBEDDING_PROVIDER",
+        "EMBEDDING_MODEL",
+        "EMBEDDING_DIMS",
+        "EMBEDDING_API_KEY",
+        "OPENAI_EMBEDDING_BASE_URL",
+        "QWEN_EMBEDDING_BASE_URL",
+        "DASHSCOPE_EMBEDDING_BASE_URL",
+        "OLLAMA_EMBEDDING_BASE_URL",
+        "SILICONFLOW_EMBEDDING_BASE_URL",
+    }
+    upgrades: dict[str, str] = {}
+    for key, value in defaults.items():
+        if key not in upgrade_keys or value == "":
+            continue
+        existing_value = existing.get(key, "")
+        if _should_upgrade_embedding_value(key, existing_value):
+            upgrades[key] = value
+    return upgrades
+
+
+def _should_upgrade_provider(existing: str, default: str) -> bool:
+    existing_provider = existing.strip().lower()
+    default_provider = default.strip().lower()
+    return existing_provider in {"", "none", "mock"} and default_provider not in {
+        "",
+        "none",
+        "mock",
+    }
+
+
+def _should_upgrade_embedding_value(key: str, existing: str) -> bool:
+    value = existing.strip().lower()
+    if key == "EMBEDDING_PROVIDER":
+        return value in {"", "none", "mock"}
+    if key == "EMBEDDING_MODEL":
+        return value in {"", "none", "mock"}
+    if key == "EMBEDDING_DIMS":
+        return value in {"", "384"}
+    return value == ""
 
 
 def build_powermem_env_defaults(
@@ -175,12 +258,35 @@ def build_powermem_env_defaults(
         "AGENT_ENABLED": raw.get("AGENT_ENABLED", "true"),
         "AGENT_MEMORY_MODE": raw.get("AGENT_MEMORY_MODE", "auto"),
         "INTELLIGENT_MEMORY_ENABLED": raw.get("INTELLIGENT_MEMORY_ENABLED", "true"),
+        "INTELLIGENT_MEMORY_FALLBACK_TO_SIMPLE_ADD": raw.get(
+            "INTELLIGENT_MEMORY_FALLBACK_TO_SIMPLE_ADD",
+            "true",
+        ),
     }
     _fill_embedding(values, raw)
     _fill_llm(values, raw)
     _fill_storage(values, raw)
     _apply_prefixed_powermem_overrides(values, raw)
     return values
+
+
+def powermem_llm_configured(raw: Mapping[str, str] | None = None) -> bool:
+    """Return whether managed PowerMem config has enough LLM settings for infer."""
+    raw_values = dict(raw or _contextseek_raw_env())
+    values = build_powermem_env_defaults(raw_values)
+    values.update(read_env_file(managed_powermem_env_path()))
+    provider = values.get("LLM_PROVIDER", "").strip().lower()
+    if not provider or provider in {"none", "mock"}:
+        return False
+    if not values.get("LLM_MODEL", "").strip():
+        return False
+    api_key = values.get("LLM_API_KEY", "").strip() or _provider_api_key(
+        values,
+        provider,
+    )
+    if _provider_needs_api_key(provider) and not api_key:
+        return False
+    return True
 
 
 def manual_field_warnings(
@@ -593,6 +699,8 @@ def _write_env_preserving_existing(path: Path, additions: dict[str, str]) -> Non
     else:
         lines = path.read_text(encoding="utf-8").rstrip("\n").splitlines()
     if additions:
+        prefixes = tuple(f"{key}=" for key in additions)
+        lines = [line for line in lines if not line.startswith(prefixes)]
         if lines and lines[-1].strip():
             lines.append("")
         lines.extend(f"{key}={value}" for key, value in sorted(additions.items()))

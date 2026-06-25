@@ -35,6 +35,27 @@ class PlugMCPProxy:
             query={},
             context={"mcp_tool_name": name},
         )
+        is_search_request = getattr(self.adapter, "is_search_request", None)
+        if callable(is_search_request) and is_search_request(request):
+            contextseek_search = getattr(
+                self.adapter, "handle_contextseek_search", None
+            )
+            if callable(contextseek_search):
+                response = contextseek_search(self.client, request)
+            else:
+                response = self.adapter.handle_search(request)
+            body = response.body
+            structured = body if isinstance(body, dict) else {"result": body}
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(body, ensure_ascii=False),
+                    }
+                ],
+                "structuredContent": structured,
+            }
+
         result = self.adapter.handle_write(request)
         if not isinstance(result, PlugProxyResult):
             result = PlugProxyResult(response=result, events=[])
