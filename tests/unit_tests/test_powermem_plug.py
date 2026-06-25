@@ -318,6 +318,63 @@ def test_powermem_adapter_auto_enables_infer_for_hook_when_llm_configured(
     assert request.body["infer"] is False
 
 
+def test_powermem_adapter_removes_hook_metadata_from_infer_request(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    powermem_env = tmp_path / "powermem.env"
+    powermem_env.write_text(
+        "\n".join(
+            [
+                "LLM_PROVIDER=qwen",
+                "LLM_MODEL=qwen-plus",
+                "LLM_API_KEY=llm-key",
+            ],
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_ENV_FILE", str(powermem_env))
+    request = PlugProxyRequest(
+        method="POST",
+        path="/api/v1/memories",
+        body={
+            "content": "Claude Code session transcript\n\n[User]\n喜欢吃火锅",
+            "user_id": "u1",
+            "agent_id": "claude-code",
+            "run_id": "session-a",
+            "metadata": {
+                "kind": "session-end-transcript",
+                "source": "claude-code-hook",
+                "session_id": "session-a",
+                "transcript_path": "~/.claude/projects/a.jsonl",
+                "cwd": "~/tmp_data",
+                "scope": "contextseek",
+            },
+        },
+        headers={},
+        query={},
+    )
+
+    adapter = PowerMemAdapter(instance_id="i1")
+    prepared = adapter.prepare_write_request(request)
+
+    assert prepared.body["infer"] is True
+    assert "metadata" not in prepared.body
+    assert "run_id" not in prepared.body
+    assert prepared.body["scope"] == "contextseek"
+    assert request.body["run_id"] == "session-a"
+    assert request.body["metadata"]["session_id"] == "session-a"
+
+    events = adapter.events_from_write_response(
+        {"results": [{"id": "m1", "memory": "喜欢吃火锅", "event": "ADD"}]},
+        prepared,
+    )
+
+    assert events[0].raw_payload["request"]["metadata"]["session_id"] == "session-a"
+    assert "metadata" not in events[0].raw_payload["forwarded_request"]
+
+
 def test_powermem_adapter_keeps_hook_infer_false_without_llm(
     tmp_path,
     monkeypatch,

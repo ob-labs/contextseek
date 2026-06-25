@@ -38,12 +38,22 @@ MEMORIES_PATH = "/api/v1/memories"
 MEMORIES_SEARCH_PATH = "/api/v1/memories/search"
 _AUTO_INFER_CONTEXT_KEY = "powermem_auto_infer_enabled"
 _AUTO_INFER_ORIGINAL_CONTENT_KEY = "powermem_auto_infer_original_content"
+_ORIGINAL_WRITE_BODY_CONTEXT_KEY = "powermem_original_write_body"
 _INFER_CANDIDATE_KINDS = {
     "session-end-transcript",
     "post-compact-summary",
     "compact-summary",
     "postcompact-summary",
 }
+_POWERMEM_INFER_ROUTING_KEYS = ("user_id", "agent_id", "scope", "memory_type")
+_POWERMEM_INFER_PAYLOAD_KEYS = (
+    "content",
+    "memory",
+    "messages",
+    "text",
+    "infer",
+    *_POWERMEM_INFER_ROUTING_KEYS,
+)
 
 _EVENT_MAP: dict[str, PlugOperation] = {
     "ADD": "add",
@@ -195,10 +205,12 @@ class PowerMemAdapter:
         body["infer"] = llm_configured
         context = dict(request.context)
         if llm_configured:
+            body = _sanitize_body_for_powermem_infer(body)
             context[_AUTO_INFER_CONTEXT_KEY] = True
             context[_AUTO_INFER_ORIGINAL_CONTENT_KEY] = _content_from_write_body(
                 request.body,
             )
+            context[_ORIGINAL_WRITE_BODY_CONTEXT_KEY] = request.body
         return replace(request, body=body, context=context)
 
     def handle_search(self, request: PlugProxyRequest) -> PlugProxyResponse:
@@ -254,11 +266,17 @@ class PowerMemAdapter:
         if request.method.upper() == "DELETE":
             return self.events_from_delete_response(response_body, request)
         records = self._records_from_response(response_body)
+        request_body = (
+            _original_write_body_from_context(request.context) or request.body
+        )
+        raw_payload = {"request": request_body, "response": response_body}
+        if request_body != request.body:
+            raw_payload["forwarded_request"] = request.body
         return self._events_from_records(
             records,
             request.body,
             default_operation="add",
-            raw_payload={"request": request.body, "response": response_body},
+            raw_payload=raw_payload,
             request_context=request.context,
         )
 
@@ -540,6 +558,30 @@ def _is_auto_infer_candidate(body: dict[str, Any]) -> bool:
             or "compact summary" in lowered
         )
     return False
+
+
+def _sanitize_body_for_powermem_infer(body: dict[str, Any]) -> dict[str, Any]:
+    """Keep transient hook metadata out of PowerMem's infer-time filters."""
+    metadata = body.get("metadata")
+
+    sanitized = {
+        key: body[key]
+        for key in _POWERMEM_INFER_PAYLOAD_KEYS
+        if key in body and body[key] is not None
+    }
+    if not isinstance(metadata, dict) or not metadata:
+        return sanitized
+
+    for key in _POWERMEM_INFER_ROUTING_KEYS:
+        value = metadata.get(key)
+        if value is not None and key not in sanitized:
+            sanitized[key] = value
+    return sanitized
+
+
+def _original_write_body_from_context(context: dict[str, Any]) -> dict[str, Any] | None:
+    value = context.get(_ORIGINAL_WRITE_BODY_CONTEXT_KEY)
+    return value if isinstance(value, dict) else None
 
 
 def _content_from_write_body(body: Any) -> str | None:
