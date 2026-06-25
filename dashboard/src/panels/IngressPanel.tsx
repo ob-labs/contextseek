@@ -67,6 +67,15 @@ interface MockOperation {
   title: string;
   status: EntryStatus;
   steps: OperationStep[];
+  progress?: OperationProgress;
+}
+
+interface OperationProgress {
+  label?: string;
+  current: number;
+  total: number;
+  detail: string;
+  percent?: number;
 }
 
 type OperationStepState = "done" | "current" | "pending" | "blocked";
@@ -79,6 +88,7 @@ interface OperationStep {
 
 const PLUG_JOB_POLL_MS = 1_000;
 const SHOW_RUNTIME_OVERVIEW = false;
+const ENABLED_POWERMEM_ENTRY_IDS = new Set(["claude-code", "codex"]);
 
 const SOURCE_COLORS: Record<string, string> = {
   document: "linear-gradient(90deg,#4b8dff,#6cb2ff)",
@@ -98,54 +108,54 @@ const POWERMEM_ENTRIES: PlugEntry[] = [
     status: "ready",
   },
   {
-    id: "cursor",
-    name: "Cursor",
-    status: "ready",
-  },
-  {
-    id: "vscode",
-    name: "VS Code",
-    status: "ready",
-  },
-  {
     id: "codex",
     name: "Codex",
     status: "ready",
   },
   {
+    id: "cursor",
+    name: "Cursor",
+    status: "planned",
+  },
+  {
+    id: "vscode",
+    name: "VS Code",
+    status: "planned",
+  },
+  {
     id: "windsurf",
     name: "Windsurf",
-    status: "ready",
+    status: "planned",
   },
   {
     id: "github-copilot",
     name: "GitHub Copilot",
-    status: "ready",
+    status: "planned",
   },
   {
     id: "opencode",
     name: "OpenCode",
-    status: "ready",
+    status: "planned",
   },
   {
     id: "claude-desktop",
     name: "Claude Desktop",
-    status: "ready",
+    status: "planned",
   },
   {
     id: "cline",
     name: "Cline",
-    status: "ready",
+    status: "planned",
   },
   {
     id: "openclaw",
     name: "OpenClaw",
-    status: "ready",
+    status: "planned",
   },
   {
     id: "qoder",
     name: "Qoder",
-    status: "ready",
+    status: "planned",
   },
 ];
 
@@ -264,9 +274,13 @@ function actionLabel(
   }
   if (status === "needs_action") return t("ingress.action.fix");
   if (status === "disabled" || status === "planned") {
-    return t("ingress.action.preview");
+    return t("ingress.action.comingSoon");
   }
   return t("ingress.action.connect");
+}
+
+function isPowerMemEntryEnabled(entry: PlugEntry): boolean {
+  return ENABLED_POWERMEM_ENTRY_IDS.has(entry.id);
 }
 
 function StepIcon({ state }: { state: OperationStepState }) {
@@ -545,6 +559,52 @@ function delay(ms: number): Promise<void> {
   });
 }
 
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  const digits = index === 0 || value >= 10 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[index]}`;
+}
+
+function jobProgressDetail(
+  job: PlugInstallJobResponse,
+  t: (key: string, vars?: Record<string, string | number>) => string,
+): OperationProgress | undefined {
+  const label = job.progress_label ?? undefined;
+  const current = Math.max(job.progress_current ?? 0, 0);
+  const total = Math.max(job.progress_total ?? 0, 0);
+  if (!label && current <= 0 && total <= 0) {
+    return undefined;
+  }
+  const percent = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : undefined;
+  const detail =
+    total > 0
+      ? t("ingress.progress.download", {
+          name: label ?? t("ingress.progress.runtime"),
+          current: formatBytes(current),
+          total: formatBytes(total),
+        })
+      : t("ingress.progress.downloadUnknownTotal", {
+          name: label ?? t("ingress.progress.runtime"),
+          current: formatBytes(current),
+        });
+  return {
+    label,
+    current,
+    total,
+    detail,
+    percent,
+  };
+}
+
 function buildThroughput(items: ContextItem[]) {
   const today = new Date();
   const days = Array.from({ length: 7 }, (_, i) => {
@@ -735,6 +795,9 @@ export function IngressPanel() {
 
   const entryStatus = useCallback(
     (plug: PlugDefinition, entry: PlugEntry) => {
+      if (plug.id === "powermem" && !isPowerMemEntryEnabled(entry)) {
+        return "planned";
+      }
       const result = entryResults[`${plug.id}:${entry.id}`];
       if (result?.status === "checking" && !statusRefreshing) {
         return entry.status;
@@ -907,6 +970,7 @@ export function IngressPanel() {
           title: operationTitleFromJob(job, { updateConfig, t }),
           status: job.result ? toEntryStatus(job.result.status) : status,
           steps: buildFlowStepsFromJob(entry, job, t),
+          progress: jobProgressDetail(job, t),
         });
       };
 
@@ -1038,6 +1102,31 @@ export function IngressPanel() {
                   <StatusBadge status={operation.status} />
                 </div>
                 <OperationFlow steps={operation.steps} />
+                {operation.progress && (
+                  <div className="mt-3 rounded-md border bg-background px-3 py-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span
+                        className="min-w-0 truncate text-muted-foreground"
+                        title={operation.progress.detail}
+                      >
+                        {operation.progress.detail}
+                      </span>
+                      {operation.progress.percent != null && (
+                        <span className="shrink-0 font-medium">
+                          {operation.progress.percent}%
+                        </span>
+                      )}
+                    </div>
+                    {operation.progress.percent != null && (
+                      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+                        <div
+                          className="h-full rounded-full bg-blue-600 transition-all"
+                          style={{ width: `${operation.progress.percent}%` }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             ) : statusRefreshing ? (
               <div className="rounded-md border border-blue-500/30 bg-blue-500/5 p-3 text-xs text-blue-900 dark:text-blue-100">
@@ -1078,14 +1167,21 @@ export function IngressPanel() {
                   const result = entryResults[`${selectedPlug.id}:${entry.id}`];
                   const requirement = entryRequirement(entry, t, result);
                   const installing = installingEntryId === entry.id;
+                  const enabled =
+                    selectedPlug.id !== "powermem" || isPowerMemEntryEnabled(entry);
+                  const detailText = enabled
+                    ? requirement
+                    : t("ingress.blocker.comingSoon");
                   return (
                     <div
                       key={entry.id}
                       className={cn(
                         "flex h-full flex-col rounded-md border p-3 transition-colors",
-                        status === "connected"
-                          ? "border-emerald-500/30 bg-emerald-500/5"
-                          : "bg-background hover:bg-muted/30",
+                        !enabled
+                          ? "border-muted bg-muted/30 opacity-60"
+                          : status === "connected"
+                            ? "border-emerald-500/30 bg-emerald-500/5"
+                            : "bg-background hover:bg-muted/30",
                       )}
                     >
                       <div className="flex items-start justify-between gap-2">
@@ -1098,9 +1194,9 @@ export function IngressPanel() {
                           </div>
                           <div
                             className="mt-1 h-4 truncate text-xs text-amber-700 dark:text-amber-300"
-                            aria-hidden={requirement ? undefined : true}
+                            aria-hidden={detailText ? undefined : true}
                           >
-                            {requirement}
+                            {detailText}
                           </div>
                         </div>
                       </div>
@@ -1113,6 +1209,7 @@ export function IngressPanel() {
                           variant={status === "ready" ? "default" : "outline"}
                           className="h-7 px-2"
                           disabled={
+                            !enabled ||
                             status === "checking" ||
                             installingEntryId !== null ||
                             statusLoading

@@ -1,9 +1,12 @@
 """Unit tests for PowerMemPlug."""
 
+import hashlib
 import json
 import os
 import shlex
 import subprocess
+import tarfile
+import zipfile
 from argparse import Namespace
 from pathlib import Path
 
@@ -20,7 +23,6 @@ from contextseek.plugs.powermem.http import base_url_for_instance
 from contextseek.plugs.powermem.mcp import (
     PowerMemMCPAdapter,
     PowerMemMCPStdioClient,
-    PowerMemSDKSubprocessClient,
     create_powermem_mcp_proxy,
 )
 from contextseek.plugs.powermem.env import (
@@ -28,6 +30,7 @@ from contextseek.plugs.powermem.env import (
     powermem_child_process_env,
     read_env_file,
 )
+import contextseek.plugs.powermem.cli as powermem_cli
 from contextseek.plugs.powermem.serve import (
     _status_from_warnings,
     build_powermem_serve_plan,
@@ -36,9 +39,11 @@ import contextseek.plugs.powermem.sdk as powermem_sdk
 from contextseek.plugs.powermem.sdk import Memory as PowerMemMemoryProxy
 from contextseek.plugs.powermem.linkers import available_linker_names
 from contextseek.plugs.powermem.linkers.claude_code import (
-    create_linker as create_claude_code_linker,
+    create_mcp_linker as create_claude_code_mcp_linker,
 )
+import contextseek.plugs.powermem.linkers.claude_code_plugin as claude_code_plugin
 import contextseek.plugs.powermem.linkers.config as linker_config
+import contextseek.plugs.powermem.linkers.runtime as powermem_runtime
 from contextseek.plugs.core.protocols import PlugProxyRequest
 
 
@@ -98,6 +103,8 @@ def _mcp_structured(result):
 
 @pytest.fixture(autouse=True)
 def _managed_powermem_env_path(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("CONTEXTSEEK_DESKTOP", raising=False)
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_RUNTIME_MODE", raising=False)
     monkeypatch.setenv(
         "CONTEXTSEEK_POWERMEM_ENV_FILE",
         str(tmp_path / "powermem.env"),
@@ -105,6 +112,10 @@ def _managed_powermem_env_path(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(
         "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG",
         str(tmp_path / "claude-code.mcp.json"),
+    )
+    monkeypatch.setenv(
+        "CONTEXTSEEK_CLAUDE_CODE_COMMAND",
+        str(tmp_path / "missing-claude"),
     )
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_PACKAGE_INSTALL", "0")
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "0")
@@ -269,6 +280,160 @@ def test_powermem_adapter_defaults_scope_to_contextseek() -> None:
     assert events[0].scope == "contextseek"
 
 
+def test_powermem_adapter_auto_enables_infer_for_hook_when_llm_configured(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    powermem_env = tmp_path / "powermem.env"
+    powermem_env.write_text(
+        "\n".join(
+            [
+                "LLM_PROVIDER=qwen",
+                "LLM_MODEL=qwen-plus",
+                "LLM_API_KEY=llm-key",
+            ],
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_ENV_FILE", str(powermem_env))
+    request = PlugProxyRequest(
+        method="POST",
+        path="/api/v1/memories",
+        body={
+            "content": "Claude Code session transcript\n\n[User]\n喜欢喝可乐",
+            "infer": False,
+            "metadata": {
+                "kind": "session-end-transcript",
+                "source": "claude-code-hook",
+            },
+        },
+        headers={},
+        query={},
+    )
+
+    prepared = PowerMemAdapter(instance_id="i1").prepare_write_request(request)
+
+    assert prepared.body["infer"] is True
+    assert request.body["infer"] is False
+
+
+def test_powermem_adapter_keeps_hook_infer_false_without_llm(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    powermem_env = tmp_path / "powermem.env"
+    powermem_env.write_text("DATABASE_PROVIDER=sqlite\n", encoding="utf-8")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_ENV_FILE", str(powermem_env))
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    request = PlugProxyRequest(
+        method="POST",
+        path="/api/v1/memories",
+        body={
+            "content": "Claude Code session transcript\n\n[User]\n喜欢喝可乐",
+            "infer": False,
+            "metadata": {"kind": "session-end-transcript"},
+        },
+        headers={},
+        query={},
+    )
+
+    prepared = PowerMemAdapter(instance_id="i1").prepare_write_request(request)
+
+    assert prepared is not request
+    assert prepared.body["infer"] is False
+
+
+def test_powermem_adapter_disables_default_infer_for_hook_without_llm(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    powermem_env = tmp_path / "powermem.env"
+    powermem_env.write_text("DATABASE_PROVIDER=sqlite\n", encoding="utf-8")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_ENV_FILE", str(powermem_env))
+    monkeypatch.setenv("LLM_PROVIDER", "none")
+    request = PlugProxyRequest(
+        method="POST",
+        path="/api/v1/memories",
+        body={
+            "content": "Compact summary: 用户喜欢喝可乐",
+            "metadata": {"kind": "compact-summary"},
+        },
+        headers={},
+        query={},
+    )
+
+    prepared = PowerMemAdapter(instance_id="i1").prepare_write_request(request)
+
+    assert prepared.body["infer"] is False
+    assert "infer" not in request.body
+
+
+def test_powermem_adapter_marks_auto_infer_simple_fallback_as_raw(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    powermem_env = tmp_path / "powermem.env"
+    powermem_env.write_text(
+        "LLM_PROVIDER=qwen\nLLM_MODEL=qwen-plus\nLLM_API_KEY=llm-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_ENV_FILE", str(powermem_env))
+    original_content = "Claude Code session transcript\n\n[User]\n喜欢喝可乐"
+    request = PlugProxyRequest(
+        method="POST",
+        path="/api/v1/memories",
+        body={
+            "content": original_content,
+            "infer": False,
+            "metadata": {"kind": "session-end-transcript"},
+        },
+        headers={},
+        query={},
+    )
+    adapter = PowerMemAdapter(instance_id="i1")
+    prepared = adapter.prepare_write_request(request)
+
+    events = adapter.events_from_write_response(
+        {"results": [{"id": "m1", "memory": original_content, "event": "ADD"}]},
+        prepared,
+    )
+
+    assert events[0].stage_hint == "raw"
+
+
+def test_powermem_adapter_marks_auto_infer_extracted_result_as_extracted(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    powermem_env = tmp_path / "powermem.env"
+    powermem_env.write_text(
+        "LLM_PROVIDER=qwen\nLLM_MODEL=qwen-plus\nLLM_API_KEY=llm-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_ENV_FILE", str(powermem_env))
+    request = PlugProxyRequest(
+        method="POST",
+        path="/api/v1/memories",
+        body={
+            "content": "Claude Code session transcript\n\n[User]\n喜欢喝可乐",
+            "infer": False,
+            "metadata": {"kind": "session-end-transcript"},
+        },
+        headers={},
+        query={},
+    )
+    adapter = PowerMemAdapter(instance_id="i1")
+    prepared = adapter.prepare_write_request(request)
+
+    events = adapter.events_from_write_response(
+        {"results": [{"id": "m1", "memory": "用户喜欢喝可乐", "event": "ADD"}]},
+        prepared,
+    )
+
+    assert events[0].stage_hint == "extracted"
+
+
 def test_powermem_adapter_delete_request_creates_delete_event() -> None:
     adapter = PowerMemAdapter(instance_id="i1")
     events = adapter.events_from_write_response(
@@ -309,6 +474,33 @@ def test_powermem_http_health_is_read_request() -> None:
     )
 
     assert plug.is_write_request(request) is False
+
+
+def test_powermem_http_search_uses_contextseek(tmp_path) -> None:
+    from tests.unit_tests.test_pluggateway import _contextseek
+
+    ctx, _backend = _contextseek(tmp_path)
+    ctx.add(
+        "http search hit from contextseek", scope="tenant/agent/user", source="test"
+    )
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+    request = PlugProxyRequest(
+        method="POST",
+        path="/api/v1/memories/search",
+        body={"query": "search", "scope": "tenant/agent/user", "limit": 3},
+        headers={},
+        query={},
+    )
+
+    response = plug.handle_contextseek_search(ctx, request)
+
+    assert response.body["success"] is True
+    assert response.body["data"]["results"][0]["content"] == (
+        "http search hit from contextseek"
+    )
+    assert response.body["data"]["total"] == 1
+    assert response.body["data"]["query"] == "search"
+    assert response.body["message"] == "Search completed successfully"
 
 
 def test_powermem_cli_adapter_falls_back_to_add_args() -> None:
@@ -352,6 +544,99 @@ def test_powermem_cli_adapter_handles_real_pmem_global_options() -> None:
     assert events[0].stage_hint == "raw"
 
 
+def test_powermem_cli_main_resolves_real_pmem_from_env_file(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    env_file = tmp_path / "powermem.env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "CONTEXTSEEK_POWERMEM_CLI=/managed/powermem/bin/pmem",
+                "CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE=contextseek",
+                "SQLITE_PATH=/tmp/powermem.sqlite3",
+            ],
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_CLI", raising=False)
+    monkeypatch.delenv("CONTEXTSEEK_REAL_PMEM", raising=False)
+    monkeypatch.delenv("PMEM_PATH", raising=False)
+
+    calls: list[tuple[list[str], dict[str, str]]] = []
+    materialized = []
+
+    def fake_run_cli(argv, *, env=None, cwd=None):
+        assert cwd == tmp_path
+        calls.append((argv, env or {}))
+        return Namespace(
+            stdout=json.dumps(
+                {"results": [{"id": "m1", "memory": "remember apple", "event": "ADD"}]},
+            )
+            + "\n",
+            stderr="",
+            returncode=0,
+        )
+
+    def fake_materialize_cli_events(events):
+        materialized.extend(events)
+        return []
+
+    monkeypatch.setattr(powermem_cli, "run_cli", fake_run_cli)
+    monkeypatch.setattr(
+        powermem_cli,
+        "materialize_cli_events",
+        fake_materialize_cli_events,
+    )
+
+    rc = powermem_cli.main(
+        [
+            "--env-file",
+            str(env_file),
+            "--json",
+            "-j",
+            "memory",
+            "add",
+            "remember apple",
+        ],
+    )
+
+    assert rc == 0
+    assert calls[0][0][0] == "/managed/powermem/bin/pmem"
+    assert calls[0][1]["POWERMEM_ENV_FILE"] == str(env_file)
+    assert calls[0][1]["SQLITE_PATH"] == "/tmp/powermem.sqlite3"
+    assert len(materialized) == 1
+    assert materialized[0].content == "remember apple"
+    assert materialized[0].scope == "contextseek"
+    capsys.readouterr()
+
+
+def test_powermem_cli_main_search_uses_contextseek_not_real_pmem(
+    tmp_path,
+    monkeypatch,
+    capsys,
+) -> None:
+    from tests.unit_tests.test_pluggateway import _contextseek
+
+    ctx, _backend = _contextseek(tmp_path)
+    ctx.add("cli search hit from contextseek", scope="contextseek", source="test")
+
+    def fail_run_cli(*_args, **_kwargs):
+        raise AssertionError("search should not call the real pmem CLI")
+
+    monkeypatch.setattr(powermem_cli, "run_cli", fail_run_cli)
+    monkeypatch.setattr(powermem_cli, "_contextseek_client", lambda: ctx)
+
+    rc = powermem_cli.main(["memory", "search", "cli", "--limit", "3"])
+
+    output = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert output["results"][0]["memory"] == "cli search hit from contextseek"
+    assert "_contextseek" not in output
+
+
 def test_powermem_cli_adapter_ignores_real_pmem_search() -> None:
     adapter = PowerMemCLIAdapter(instance_id="i1")
     events = adapter.events_from_cli_success(
@@ -384,13 +669,12 @@ def test_powermem_mcp_proxy_forwards_then_materializes_add(tmp_path) -> None:
     assert ctx.retrieve("mcp", scope="tenant/agent/user", k=3).items
 
 
-def test_powermem_mcp_proxy_forwards_search_without_materializing(tmp_path) -> None:
+def test_powermem_mcp_proxy_search_uses_contextseek_not_powermem(tmp_path) -> None:
     from tests.unit_tests.test_pluggateway import _contextseek
 
     ctx, _backend = _contextseek(tmp_path)
-    mcp_client = _FakeMCPClient(
-        [{"results": [{"id": "mcp-1", "memory": "search hit"}]}]
-    )
+    ctx.add("mcp search hit from contextseek", scope="tenant/agent/user", source="test")
+    mcp_client = _FakeMCPClient([])
     proxy = PlugMCPProxy(
         client=ctx,
         adapter=PowerMemMCPAdapter(instance_id="i1", mcp_client=mcp_client),
@@ -401,10 +685,11 @@ def test_powermem_mcp_proxy_forwards_search_without_materializing(tmp_path) -> N
         {"query": "search", "scope": "tenant/agent/user"},
     )
 
-    assert mcp_client.calls == [("search_memories", {"query": "search"})]
-    assert _mcp_structured(result)["results"][0]["memory"] == "search hit"
-    assert _mcp_structured(result)["_contextseek"]["status"] == "no_events"
-    assert not ctx.retrieve("search", scope="tenant/agent/user", k=3).items
+    assert mcp_client.calls == []
+    assert _mcp_structured(result)["results"][0]["memory"] == (
+        "mcp search hit from contextseek"
+    )
+    assert "_contextseek" not in _mcp_structured(result)
 
 
 def test_powermem_mcp_proxy_materializes_update(tmp_path) -> None:
@@ -572,6 +857,24 @@ def test_powermem_sdk_memory_proxy_materializes_add(tmp_path) -> None:
     assert ctx.retrieve("sdk", scope="tenant/agent/user", k=3).items
 
 
+def test_powermem_sdk_memory_proxy_search_uses_contextseek(tmp_path) -> None:
+    from tests.unit_tests.test_pluggateway import _contextseek
+
+    ctx, _backend = _contextseek(tmp_path)
+    ctx.add("sdk search hit from contextseek", scope="tenant/agent/user", source="test")
+    memory = PowerMemMemoryProxy(
+        powermem_memory=_FakeSDKMemory(),
+        contextseek_client=ctx,
+        instance_id="i1",
+        default_scope="tenant/agent/user",
+    )
+
+    result = memory.search("search", limit=3)
+
+    assert result["results"][0]["memory"] == "sdk search hit from contextseek"
+    assert "_contextseek" not in result
+
+
 def test_powermem_sdk_proxy_short_circuits_private_getattr() -> None:
     memory = PowerMemMemoryProxy.__new__(PowerMemMemoryProxy)
 
@@ -628,7 +931,6 @@ def test_available_linkers_cover_powermem_readme_targets() -> None:
 
     assert {
         "claude-code",
-        "claude-code-mcp",
         "claude-desktop",
         "cline",
         "codex",
@@ -640,46 +942,64 @@ def test_available_linkers_cover_powermem_readme_targets() -> None:
         "vscode",
         "windsurf",
     }.issubset(names)
+    assert "claude-code-http" not in names
+    assert "claude-code-mcp" not in names
 
 
-def test_claude_code_prefers_mcp_and_http_is_disabled_by_default(
+def test_claude_code_default_is_http_and_aliases_are_hidden(
     tmp_path,
     monkeypatch,
 ) -> None:
-    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", raising=False)
-    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_ENABLED", raising=False)
     config = tmp_path / "claude-code.mcp.json"
+    settings = tmp_path / "claude-settings.json"
+    plugin_dir = tmp_path / "claude-plugin"
+    plugin_dir.mkdir()
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG", str(config))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(settings))
+    monkeypatch.setattr(
+        claude_code_plugin.ClaudeCodePluginRuntimeInstaller,
+        "prepared_plugin_dir",
+        lambda _self: plugin_dir,
+    )
 
     names = set(available_linker_names())
-    mcp_result = PowerMemProxyPlug(base_url="http://powermem.local").install(
+    default_result = PowerMemProxyPlug(base_url="http://powermem.local").install(
         linker="claude-code",
     )
-    http_result = PowerMemProxyPlug(base_url="http://powermem.local").install(
+    alias_result = PowerMemProxyPlug(base_url="http://powermem.local").install(
         linker="claude-code-http",
+        dry_run=True,
+    )
+    mcp_alias_result = PowerMemProxyPlug(base_url="http://powermem.local").install(
+        linker="claude-code-mcp",
+        dry_run=True,
     )
 
     assert "claude-code" in names
-    assert "claude-code-mcp" in names
+    assert "claude-code-mcp" not in names
     assert "claude-code-http" not in names
-    assert mcp_result.changed is True
+    assert default_result.changed is True
+    assert not default_result.warnings
+    settings_payload = json.loads(settings.read_text(encoding="utf-8"))
+    assert "POWERMEM_BASE_URL" not in settings_payload["env"]
+    assert settings_payload["env"]["POWERMEM_AGENT_ID"] == "claude-code"
+    runtime_env = read_env_file(plugin_dir / "config" / "runtime.env")
     assert (
-        _command_name(
-            json.loads(config.read_text(encoding="utf-8"))["mcpServers"]["powermem"][
-                "command"
-            ]
-        )
-        == "contextseek-pmem-mcp-stdio"
+        runtime_env["POWERMEM_BASE_URL"]
+        == "http://127.0.0.1:2882/plugins/powermem/default"
     )
-    assert http_result.changed is False
-    assert http_result.warnings == [
-        "disabled linker: claude-code-http "
-        "(Claude Code HTTP hook channel requires the official PowerMem Claude Code "
-        "plugin binary package; use claude-code for MCP mode)",
-    ]
+    assert runtime_env["POWERMEM_AGENT_ID"] == "claude-code"
+    assert not config.exists()
+    assert alias_result.changed is False
+    assert not alias_result.warnings
+    assert any(
+        "write Claude Code settings env" in action for action in alias_result.actions
+    )
+    assert mcp_alias_result.changed is False
+    assert mcp_alias_result.warnings == ["unknown linker: claude-code-mcp"]
 
 
-def test_claude_code_mcp_default_registers_user_scope_through_claude_cli(
+def test_claude_code_mcp_alias_registers_user_scope_through_claude_cli(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -688,6 +1008,7 @@ def test_claude_code_mcp_default_registers_user_scope_through_claude_cli(
     claude.chmod(0o755)
     env_file = tmp_path / "powermem.env"
     legacy_config = tmp_path / ".mcp.json"
+    settings_config = tmp_path / "settings.json"
     legacy_config.write_text(
         json.dumps(
             {
@@ -702,6 +1023,18 @@ def test_claude_code_mcp_default_registers_user_scope_through_claude_cli(
         ),
         encoding="utf-8",
     )
+    settings_config.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "KEEP_ME": "1",
+                    "POWERMEM_BASE_URL": "http://127.0.0.1:2882/plugins/powermem/default",
+                    "POWERMEM_AGENT_ID": "claude-code",
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
     calls: list[list[str]] = []
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG", raising=False)
@@ -711,13 +1044,17 @@ def test_claude_code_mcp_default_registers_user_scope_through_claude_cli(
     monkeypatch.delenv("CONTEXTSEEK_CONFIG", raising=False)
     monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(claude))
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_ENV_FILE", str(env_file))
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS",
+        str(settings_config),
+    )
 
     def fake_run(command, **kwargs):
         calls.append(list(command))
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(linker_config.subprocess, "run", fake_run)
-    linker = create_claude_code_linker()
+    linker = create_claude_code_mcp_linker()
 
     result = linker.configure_proxy(plug_name="powermem")
 
@@ -751,9 +1088,14 @@ def test_claude_code_mcp_default_registers_user_scope_through_claude_cli(
     legacy_payload = json.loads(legacy_config.read_text(encoding="utf-8"))
     assert "powermem" not in legacy_payload["mcpServers"]
     assert legacy_payload["mcpServers"]["other"]["command"] == "keep"
+    settings_payload = json.loads(settings_config.read_text(encoding="utf-8"))
+    assert settings_payload["env"] == {"KEEP_ME": "1"}
+    assert any(
+        "remove Claude Code HTTP hook env" in action for action in result.actions
+    )
 
 
-def test_claude_code_mcp_check_uses_claude_cli_get(
+def test_claude_code_mcp_alias_check_uses_claude_cli_get(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -763,6 +1105,10 @@ def test_claude_code_mcp_check_uses_claude_cli_get(
     calls: list[list[str]] = []
     monkeypatch.delenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG", raising=False)
     monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(claude))
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS",
+        str(tmp_path / "claude-settings.json"),
+    )
     monkeypatch.setattr(
         linker_config,
         "ensure_managed_powermem_env",
@@ -779,7 +1125,7 @@ def test_claude_code_mcp_check_uses_claude_cli_get(
         return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(linker_config.subprocess, "run", fake_run)
-    linker = create_claude_code_linker()
+    linker = create_claude_code_mcp_linker()
 
     result = linker.configure_proxy(plug_name="powermem", check=True)
 
@@ -985,7 +1331,6 @@ def test_proxy_install_cursor_writes_mcp_config(tmp_path, monkeypatch) -> None:
 @pytest.mark.parametrize(
     ("linker", "env_var"),
     [
-        ("claude-code-mcp", "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG"),
         ("claude-desktop", "CONTEXTSEEK_POWERMEM_CLAUDE_DESKTOP_MCP_CONFIG"),
         ("qoder", "CONTEXTSEEK_POWERMEM_QODER_MCP_CONFIG"),
         ("cline", "CONTEXTSEEK_POWERMEM_CLINE_MCP_CONFIG"),
@@ -1019,16 +1364,16 @@ def test_proxy_install_claude_code_mcp_prepares_managed_runtime(
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG", str(config))
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_PACKAGE_INSTALL", "1")
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RUNTIME_DIR", str(runtime_dir))
-    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+    linker = create_claude_code_mcp_linker()
 
-    result = plug.install(linker="claude-code", dry_run=True)
+    result = linker.install(plug_name="powermem", dry_run=True)
 
     assert result.changed is True
     assert any(
         "would install Python package: powermem>=1.1.1" in action
         for action in result.actions
     )
-    assert not any(
+    assert any(
         "would install Python package: powermem-mcp" in action
         for action in result.actions
     )
@@ -1050,17 +1395,12 @@ def test_proxy_install_claude_code_mcp_prepares_explicit_mcp_backend(
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_PACKAGE_INSTALL", "1")
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RUNTIME_DIR", str(runtime_dir))
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_MCP_BACKEND_COMMAND", "powermem-mcp stdio")
-    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+    linker = create_claude_code_mcp_linker()
 
-    result = plug.install(linker="claude-code", dry_run=True)
+    result = linker.install(plug_name="powermem", dry_run=True)
 
-    assert any(
-        "would install Python package: powermem-mcp" in action
-        for action in result.actions
-    )
-    assert any(
-        "would install Python package: socksio" in action for action in result.actions
-    )
+    assert not any("powermem-mcp" in action for action in result.actions)
+    assert not any("socksio" in action for action in result.actions)
 
 
 def test_proxy_install_claude_code_mcp_installs_optional_ollama_provider(
@@ -1073,9 +1413,9 @@ def test_proxy_install_claude_code_mcp_installs_optional_ollama_provider(
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_PACKAGE_INSTALL", "1")
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RUNTIME_DIR", str(runtime_dir))
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
-    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+    linker = create_claude_code_mcp_linker()
 
-    result = plug.install(linker="claude-code", dry_run=True)
+    result = linker.install(plug_name="powermem", dry_run=True)
 
     assert any(
         "would install Python package: ollama" in action for action in result.actions
@@ -1090,9 +1430,9 @@ def test_proxy_install_claude_code_mcp_carries_runtime_env(
     runtime_dir = tmp_path / "powermem-runtime"
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG", str(config))
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RUNTIME_DIR", str(runtime_dir))
-    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+    linker = create_claude_code_mcp_linker()
 
-    result = plug.install(linker="claude-code")
+    result = linker.install(plug_name="powermem")
 
     assert result.changed is True
     payload = json.loads(config.read_text(encoding="utf-8"))
@@ -1119,11 +1459,153 @@ def test_powermem_mcp_stdio_client_defaults_to_managed_backend(
     ]
 
 
-def test_powermem_mcp_adapter_defaults_to_sdk_subprocess(monkeypatch) -> None:
+def test_powermem_mcp_runtime_desktop_auto_plans_release_binary_download(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime_dir = tmp_path / "missing-release-runtime"
+    monkeypatch.setenv("CONTEXTSEEK_DESKTOP", "1")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RELEASE_BINARY_DIR", str(runtime_dir))
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_RUNTIME_MODE", raising=False)
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_PACKAGE_INSTALL_STRATEGY", raising=False)
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_MCP_BACKEND_COMMAND", raising=False)
+
+    result = powermem_runtime.PowerMemMCPRuntimeInstaller().install(dry_run=True)
+    command = powermem_runtime.PowerMemMCPRuntimeInstaller().backend_command()
+
+    assert result.changed is True
+    assert not result.warnings
+    assert any(
+        "would install PowerMem release binary" in action for action in result.actions
+    )
+    assert not any("managed Python runtime" in action for action in result.actions)
+    assert command == [str(runtime_dir / "bin" / "powermem-mcp"), "stdio"]
+
+
+def test_powermem_release_binary_runtime_downloads_direct_asset_with_sha256(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime_dir = tmp_path / "powermem-release"
+    platform_id = powermem_runtime._power_mem_platform_id()
+    archive = tmp_path / f"powermem-1.2.3-{platform_id}-binaries.tar.gz"
+    _write_fake_powermem_binary_archive(
+        archive,
+        platform_id=platform_id,
+        version="1.2.3",
+    )
+    sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RUNTIME_MODE", "release_binary")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RELEASE_BINARY_DIR", str(runtime_dir))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RELEASE_BINARY_URL", archive.as_uri())
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RELEASE_BINARY_SHA256", sha256)
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_MCP_BACKEND_COMMAND", raising=False)
+
+    result = powermem_runtime.PowerMemMCPRuntimeInstaller().install()
+
+    manifest = json.loads((runtime_dir / ".installed.json").read_text(encoding="utf-8"))
+    assert result.changed is True
+    assert not result.warnings
+    assert manifest["version"] == "1.2.3"
+    assert manifest["platform"] == platform_id
+    assert (runtime_dir / "bin" / "powermem").is_file()
+    assert (runtime_dir / "bin" / "powermem-server").is_file()
+    assert (runtime_dir / "bin" / "powermem-mcp").is_file()
+    assert powermem_runtime.PowerMemMCPRuntimeInstaller().backend_command() == [
+        str(runtime_dir / "bin" / "powermem-mcp"),
+        "stdio",
+    ]
+    assert powermem_runtime.PowerMemCLIRuntimeInstaller().cli_command() == str(
+        runtime_dir / "bin" / "powermem"
+    )
+
+
+def test_powermem_release_binary_runtime_downloads_direct_asset(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime_dir = tmp_path / "powermem-release"
+    platform_id = powermem_runtime._power_mem_platform_id()
+    archive = tmp_path / f"powermem-1.2.4-{platform_id}-binaries.tar.gz"
+    _write_fake_powermem_binary_archive(
+        archive,
+        platform_id=platform_id,
+        version="1.2.4",
+    )
+    progress: list[tuple[str, int, int]] = []
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RUNTIME_MODE", "release_binary")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RELEASE_BINARY_DIR", str(runtime_dir))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RELEASE_BINARY_URL", archive.as_uri())
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_MCP_BACKEND_COMMAND", raising=False)
+
+    with powermem_runtime.power_mem_download_progress(
+        lambda label, current, total: progress.append((label, current, total))
+    ):
+        result = powermem_runtime.PowerMemMCPRuntimeInstaller().install()
+
+    manifest = json.loads((runtime_dir / ".installed.json").read_text(encoding="utf-8"))
+    assert result.changed is True
+    assert not result.warnings
+    assert manifest["version"] == "1.2.4"
+    assert manifest["asset_url"] == archive.as_uri()
+    assert progress
+    assert progress[-1][0] == archive.name
+    assert progress[-1][1] == archive.stat().st_size
+
+
+def test_powermem_release_binary_runtime_uses_installed_manifest(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime_dir = tmp_path / "powermem-release"
+    bin_dir = runtime_dir / "bin"
+    bin_dir.mkdir(parents=True)
+    for executable in ("powermem", "powermem-mcp", "powermem-server"):
+        path = bin_dir / executable
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o755)
+    (runtime_dir / ".installed.json").write_text(
+        json.dumps(
+            {
+                "version": "1.2.3",
+                "platform": powermem_runtime._power_mem_platform_id(),
+                "executables": {
+                    "powermem": "bin/powermem",
+                    "powermem-mcp": "bin/powermem-mcp",
+                    "powermem-server": "bin/powermem-server",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RUNTIME_MODE", "release_binary")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RELEASE_BINARY_DIR", str(runtime_dir))
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_MCP_BACKEND_COMMAND", raising=False)
+
+    mcp_result = powermem_runtime.PowerMemMCPRuntimeInstaller().install(check=True)
+
+    assert not mcp_result.warnings
+    assert any(
+        "PowerMem release binary already installed: powermem-mcp=" in action
+        for action in mcp_result.actions
+    )
+    assert powermem_runtime.PowerMemMCPRuntimeInstaller().backend_command() == [
+        str(bin_dir / "powermem-mcp"),
+        "stdio",
+    ]
+    assert powermem_runtime.PowerMemCLIRuntimeInstaller().cli_command() == str(
+        bin_dir / "powermem"
+    )
+    assert powermem_runtime.PowerMemHTTPRuntimeInstaller().server_command() == [
+        str(bin_dir / "powermem-server")
+    ]
+
+
+def test_powermem_mcp_adapter_defaults_to_stdio_client(monkeypatch) -> None:
     monkeypatch.delenv("CONTEXTSEEK_POWERMEM_MCP_BACKEND_COMMAND", raising=False)
     adapter = PowerMemMCPAdapter()
 
-    assert isinstance(adapter._client(), PowerMemSDKSubprocessClient)
+    assert isinstance(adapter._client(), PowerMemMCPStdioClient)
 
 
 def test_powermem_mcp_adapter_uses_explicit_backend_command(monkeypatch) -> None:
@@ -1139,6 +1621,8 @@ def test_proxy_install_claude_code_writes_http_hook_env(
 ) -> None:
     config = tmp_path / "settings.json"
     mcp_config = tmp_path / ".mcp.json"
+    plugin_dir = tmp_path / "claude-plugin"
+    plugin_dir.mkdir()
     config.write_text(
         json.dumps({"env": {"KEEP_ME": "1"}, "permissions": {"allow": ["Read(*)"]}}),
         encoding="utf-8",
@@ -1157,6 +1641,11 @@ def test_proxy_install_claude_code_writes_http_hook_env(
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG", str(mcp_config))
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
+    monkeypatch.setattr(
+        claude_code_plugin.ClaudeCodePluginRuntimeInstaller,
+        "prepared_plugin_dir",
+        lambda _self: plugin_dir,
+    )
     monkeypatch.setenv(
         "CONTEXTSEEK_POWERMEM_PROXY_URL",
         "http://127.0.0.1:2882/plugins/powermem/default",
@@ -1168,15 +1657,46 @@ def test_proxy_install_claude_code_writes_http_hook_env(
     assert result.changed is True
     payload = json.loads(config.read_text(encoding="utf-8"))
     assert payload["env"]["KEEP_ME"] == "1"
-    assert (
-        payload["env"]["POWERMEM_BASE_URL"]
-        == "http://127.0.0.1:2882/plugins/powermem/default"
-    )
+    assert "POWERMEM_BASE_URL" not in payload["env"]
     assert payload["env"]["POWERMEM_AGENT_ID"] == "claude-code"
     assert payload["permissions"]["allow"] == ["Read(*)"]
+    runtime_env = read_env_file(plugin_dir / "config" / "runtime.env")
+    assert (
+        runtime_env["POWERMEM_BASE_URL"]
+        == "http://127.0.0.1:2882/plugins/powermem/default"
+    )
+    assert runtime_env["POWERMEM_AGENT_ID"] == "claude-code"
     mcp_payload = json.loads(mcp_config.read_text(encoding="utf-8"))
     assert "powermem" not in mcp_payload["mcpServers"]
     assert mcp_payload["mcpServers"]["other"]["command"] == "keep"
+
+
+def test_proxy_install_claude_code_http_removes_user_mcp_server(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    fake_claude, log = _fake_claude_command(tmp_path)
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+
+    result = plug.install(linker="claude-code-http")
+
+    calls = log.read_text(encoding="utf-8")
+    assert result.changed is True
+    assert "mcp remove --scope user powermem" in calls
+    assert any(
+        "removed Claude Code user MCP server: powermem" in action
+        for action in result.actions
+    )
+
+
+def test_claude_code_missing_user_mcp_cleanup_is_not_a_warning() -> None:
+    assert linker_config._looks_like_missing_mcp_server(
+        'No user-scoped MCP server found with name: "powermem"',
+    )
 
 
 def test_proxy_install_claude_code_installs_missing_powermem_package(
@@ -1234,6 +1754,10 @@ def test_proxy_install_claude_code_installs_missing_plugin(
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "1")
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL_MODE",
+        "marketplace",
+    )
     monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
     plug = PowerMemProxyPlug(base_url="http://powermem.local")
 
@@ -1246,6 +1770,270 @@ def test_proxy_install_claude_code_installs_missing_plugin(
     assert "failed to install" not in "\n".join(result.warnings)
 
 
+def test_proxy_install_claude_code_dry_run_plans_managed_repo_download(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    managed_repo = tmp_path / "managed" / "powermem"
+    fake_claude, log = _fake_claude_command(tmp_path)
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "1")
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MANAGED_REPO_DIR",
+        str(managed_repo),
+    )
+    monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+
+    result = plug.install(linker="claude-code-http", dry_run=True)
+
+    assert result.changed is True
+    assert result.dry_run is True
+    assert not result.warnings
+    assert any(
+        "would download latest PowerMem release source archive" in action
+        for action in result.actions
+    )
+    assert any("releases/latest" in action for action in result.actions)
+    assert any(
+        str(managed_repo / "apps" / "claude-code-plugin") in action
+        for action in result.actions
+    )
+    assert not managed_repo.exists()
+
+
+def test_proxy_install_claude_code_downloads_source_zip_for_managed_plugin_dir(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    managed_repo = tmp_path / "managed" / "powermem"
+    source_zip = tmp_path / "powermem-source.zip"
+    _write_fake_powermem_source_zip(source_zip)
+    stale_plugin_dir = managed_repo / "apps" / "claude-code-plugin"
+    stale_plugin_dir.mkdir(parents=True)
+    stale_file = stale_plugin_dir / "STALE"
+    stale_file.write_text("old", encoding="utf-8")
+    fake_claude, log = _fake_claude_command(tmp_path)
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "1")
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MANAGED_REPO_DIR",
+        str(managed_repo),
+    )
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SOURCE_ZIP_URL",
+        source_zip.as_uri(),
+    )
+    monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+
+    result = plug.install(linker="claude-code-http")
+
+    plugin_dir = managed_repo / "apps" / "claude-code-plugin"
+    assert result.changed is True
+    assert not result.warnings
+    assert (plugin_dir / ".claude-plugin" / "plugin.json").is_file()
+    assert not stale_file.exists()
+    assert any(
+        "download latest PowerMem release source archive" in action
+        for action in result.actions
+    )
+    assert any(str(plugin_dir) in action for action in result.actions)
+
+
+def test_proxy_install_claude_code_check_accepts_existing_managed_plugin_dir(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    managed_repo = tmp_path / "managed" / "powermem"
+    source_zip = tmp_path / "powermem-source.zip"
+    _write_fake_powermem_source_zip(source_zip)
+    fake_claude, _log = _fake_claude_command(tmp_path)
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "1")
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MANAGED_REPO_DIR",
+        str(managed_repo),
+    )
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SOURCE_ZIP_URL",
+        source_zip.as_uri(),
+    )
+    monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+
+    install_result = plug.install(linker="claude-code-http")
+    check_result = plug.install(linker="claude-code-http", check=True)
+
+    assert install_result.changed is True
+    assert check_result.changed is False
+    assert check_result.dry_run is True
+    assert not check_result.warnings
+    assert not any("would download latest" in action for action in check_result.actions)
+    assert any(
+        "verified Claude Code plugin dir" in action for action in check_result.actions
+    )
+
+
+def test_proxy_install_claude_code_extracts_runtime_plugin_zip(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    plugin_zip = tmp_path / "powermem-claude-code-plugin.zip"
+    _write_fake_powermem_plugin_zip(plugin_zip, version="0.2.0")
+    fake_claude, _log = _fake_claude_command(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "1")
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_ZIP",
+        str(plugin_zip),
+    )
+    monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+
+    result = plug.install(linker="claude-code-http")
+
+    plugin_dir = (
+        tmp_path
+        / ".contextseek"
+        / "plugs"
+        / "powermem"
+        / "claude-code-plugin"
+        / "0.2.0"
+    )
+    assert result.changed is True
+    assert not result.warnings
+    assert (plugin_dir / ".claude-plugin" / "plugin.json").is_file()
+    assert claude_code_plugin._hook_binary(plugin_dir).is_file()
+    assert any("extract Claude Code plugin zip" in action for action in result.actions)
+    assert any(
+        "verified Claude Code plugin dir (0.2.0)" in action for action in result.actions
+    )
+
+
+def test_proxy_install_claude_code_defaults_to_oss_plugin_zip(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    fake_claude, _log = _fake_claude_command(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "1")
+    monkeypatch.delenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_ZIP_URL",
+        raising=False,
+    )
+    monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+
+    result = plug.install(linker="claude-code-http", dry_run=True)
+
+    assert result.changed is True
+    assert not result.warnings
+    assert any(
+        "obbusiness-private.oss-cn-shanghai.aliyuncs.com" in action
+        for action in result.actions
+    )
+
+
+def test_proxy_install_claude_code_downloads_release_plugin_zip(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    plugin_zip = tmp_path / "powermem-claude-code-plugin-0.4.0.zip"
+    _write_fake_powermem_plugin_zip(plugin_zip, version="0.4.0")
+    sha256 = hashlib.sha256(plugin_zip.read_bytes()).hexdigest()
+    fake_claude, log = _fake_claude_command(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "1")
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_ZIP_URL",
+        plugin_zip.as_uri(),
+    )
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_ZIP_SHA256", sha256)
+    monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+    progress: list[tuple[str, int, int]] = []
+
+    with powermem_runtime.power_mem_download_progress(
+        lambda label, current, total: progress.append((label, current, total))
+    ):
+        result = plug.install(linker="claude-code-http")
+
+    plugin_dir = (
+        tmp_path
+        / ".contextseek"
+        / "plugs"
+        / "powermem"
+        / "claude-code-plugin"
+        / "release"
+    )
+    assert result.changed is True
+    assert not result.warnings
+    assert progress
+    assert progress[-1][0] == plugin_zip.name
+    assert progress[-1][1] == plugin_zip.stat().st_size
+    assert (plugin_dir / ".claude-plugin" / "plugin.json").is_file()
+    assert claude_code_plugin._hook_binary(plugin_dir).is_file()
+    assert any(
+        "download PowerMem Claude Code plugin zip" in action
+        for action in result.actions
+    )
+    assert any(
+        "verified Claude Code plugin dir (0.4.0)" in action for action in result.actions
+    )
+    calls = log.read_text(encoding="utf-8")
+    assert "plugin marketplace add" in calls
+    assert str(plugin_dir) in calls
+    assert "plugin install --scope user memory-powermem" in calls
+
+
+def test_proxy_install_claude_code_plugin_zip_requires_hook_binary(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    plugin_zip = tmp_path / "powermem-claude-code-plugin.zip"
+    _write_fake_powermem_plugin_zip(
+        plugin_zip,
+        version="0.2.1",
+        include_binary=False,
+    )
+    fake_claude, _log = _fake_claude_command(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "1")
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_ZIP",
+        str(plugin_zip),
+    )
+    monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+
+    result = plug.install(linker="claude-code-http")
+
+    assert any(
+        warning.startswith("Claude Code plugin hook binary is missing")
+        for warning in result.warnings
+    )
+    assert _plug_install_status(result.warnings) == 1
+
+
 def test_proxy_install_claude_code_reuses_installed_plugin(
     tmp_path,
     monkeypatch,
@@ -1255,6 +2043,10 @@ def test_proxy_install_claude_code_reuses_installed_plugin(
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "1")
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL_MODE",
+        "marketplace",
+    )
     monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
     plug = PowerMemProxyPlug(base_url="http://powermem.local")
 
@@ -1280,6 +2072,10 @@ def test_proxy_install_claude_code_enables_disabled_plugin(
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", "1")
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "1")
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL_MODE",
+        "marketplace",
+    )
     monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
     plug = PowerMemProxyPlug(base_url="http://powermem.local")
 
@@ -1321,6 +2117,7 @@ def test_proxy_install_creates_managed_powermem_env_from_contextseek_env(
     assert values["OPENAI_EMBEDDING_BASE_URL"] == "https://embedding.example/v1"
     assert values["LLM_PROVIDER"] == "qwen"
     assert values["LLM_API_KEY"] == "llm-key"
+    assert values["INTELLIGENT_MEMORY_FALLBACK_TO_SIMPLE_ADD"] == "true"
 
 
 def test_proxy_install_maps_contextseek_seekdb_to_powermem_sqlite(
@@ -1473,6 +2270,45 @@ def test_proxy_install_preserves_existing_managed_powermem_env_values(
     assert values["EMBEDDING_API_KEY"] == "custom-key"
 
 
+def test_proxy_install_upgrades_placeholder_embedding_provider(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "settings.json"
+    powermem_env = tmp_path / "powermem.env"
+    powermem_env.write_text(
+        "\n".join(
+            [
+                "EMBEDDING_PROVIDER=mock",
+                "EMBEDDING_MODEL=mock",
+                "EMBEDDING_DIMS=384",
+                "EMBEDDING_API_KEY=custom-key",
+                "",
+            ],
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS", str(config))
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("EMBEDDING_DIMS", "1536")
+    monkeypatch.setenv("EMBEDDING_API_KEY", "new-key")
+    monkeypatch.setenv("EMBEDDING_BASE_URL", "https://embedding.example/v1")
+    plug = PowerMemProxyPlug(base_url="http://powermem.local")
+
+    result = plug.install(linker="claude-code")
+
+    text = powermem_env.read_text(encoding="utf-8")
+    values = read_env_file(powermem_env)
+    assert result.changed is True
+    assert values["EMBEDDING_PROVIDER"] == "openai"
+    assert values["EMBEDDING_MODEL"] == "text-embedding-3-small"
+    assert values["EMBEDDING_DIMS"] == "1536"
+    assert values["EMBEDDING_API_KEY"] == "custom-key"
+    assert values["OPENAI_EMBEDDING_BASE_URL"] == "https://embedding.example/v1"
+    assert text.count("EMBEDDING_PROVIDER=") == 1
+
+
 def test_powermem_child_process_env_isolates_project_provider_env(
     tmp_path,
     monkeypatch,
@@ -1491,6 +2327,9 @@ def test_powermem_child_process_env_isolates_project_provider_env(
             "LLM_MODEL": "qwen-plus",
             "EMBEDDING_PROVIDER": "langchain",
             "EMBEDDING_MODEL": "text-embedding-3-small",
+            "all_proxy": "socks5://127.0.0.1:13659",
+            "ALL_PROXY": "socks5h://127.0.0.1:13659",
+            "https_proxy": "http://127.0.0.1:13659",
         }
     )
 
@@ -1502,6 +2341,9 @@ def test_powermem_child_process_env_isolates_project_provider_env(
     assert "LLM_MODEL" not in env
     assert "EMBEDDING_PROVIDER" not in env
     assert "EMBEDDING_MODEL" not in env
+    assert "all_proxy" not in env
+    assert "ALL_PROXY" not in env
+    assert env["https_proxy"] == "http://127.0.0.1:13659"
     assert powermem_child_process_cwd() == tmp_path
 
 
@@ -1550,6 +2392,57 @@ def test_proxy_install_ignores_prefixed_powermem_llm_override(
     assert "LLM_PROVIDER" not in values
     assert "LLM_MODEL" not in values
     assert not any("PowerMem LLM" in warning for warning in result.warnings)
+
+
+def _write_fake_powermem_source_zip(path: Path) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        prefix = "powermem-main/apps/claude-code-plugin"
+        archive.writestr(
+            f"{prefix}/.claude-plugin/plugin.json",
+            json.dumps({"name": "memory-powermem", "version": "0.1.0"}),
+        )
+        archive.writestr(f"{prefix}/hooks/run-hook.sh", "#!/bin/sh\n")
+        archive.writestr(f"{prefix}/hooks/run-hook.ps1", "")
+
+
+def _write_fake_powermem_plugin_zip(
+    path: Path,
+    *,
+    version: str = "0.1.0",
+    include_binary: bool = True,
+) -> None:
+    with zipfile.ZipFile(path, "w") as archive:
+        prefix = "powermem-claude-code-plugin"
+        archive.writestr(
+            f"{prefix}/.claude-plugin/plugin.json",
+            json.dumps({"name": "memory-powermem", "version": version}),
+        )
+        archive.writestr(f"{prefix}/.mcp.json", "{}")
+        archive.writestr(f"{prefix}/hooks/run-hook.sh", "#!/bin/sh\n")
+        archive.writestr(f"{prefix}/hooks/run-hook.ps1", "")
+        archive.writestr(f"{prefix}/skills/README.md", "PowerMem")
+        if include_binary:
+            hook_binary = claude_code_plugin._hook_binary(Path(prefix))
+            archive.writestr(hook_binary.as_posix(), "#!/bin/sh\n")
+
+
+def _write_fake_powermem_binary_archive(
+    path: Path,
+    *,
+    platform_id: str | None,
+    version: str,
+) -> None:
+    assert platform_id is not None
+    suffix = ".exe" if platform_id.startswith("windows-") else ""
+    package_root = path.parent / f"powermem-{version}-{platform_id}"
+    bin_dir = package_root / "bin"
+    bin_dir.mkdir(parents=True)
+    for executable in ("powermem", "powermem-server", "powermem-mcp"):
+        binary = bin_dir / f"{executable}{suffix}"
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        binary.chmod(0o755)
+    with tarfile.open(path, "w:gz") as archive:
+        archive.add(package_root, arcname=package_root.name)
 
 
 def _fake_claude_command(
@@ -1780,31 +2673,89 @@ def test_plug_serve_dry_run_outputs_plan(capsys, tmp_path, monkeypatch) -> None:
     ]
 
 
-def test_plug_serve_blocks_disabled_claude_code_http_linker(
+def test_plug_serve_accepts_claude_code_linker(
     capsys,
     monkeypatch,
 ) -> None:
-    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_HTTP_ENABLED", raising=False)
-    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_ENABLED", raising=False)
-
     code = run_cli(
         [
             "plug-serve",
             "powermem",
             "--linker",
-            "claude-code-http",
+            "claude-code",
             "--no-install",
             "--dry-run",
         ]
     )
 
-    assert code == 1
+    assert code == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["warnings"] == [
-        "disabled linker: claude-code-http "
-        "(Claude Code HTTP hook channel requires the official PowerMem Claude Code "
-        "plugin binary package; use claude-code for MCP mode)",
+    assert payload["warnings"] == []
+    assert payload["proxy_base_url"].endswith("/plugins/powermem/default")
+
+
+def test_plug_run_dry_run_outputs_claude_code_plan(
+    capsys,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime_dir = tmp_path / "powermem-runtime"
+    plugin_zip = tmp_path / "powermem-claude-code-plugin.zip"
+    fake_claude, _log = _fake_claude_command(tmp_path)
+    _write_fake_powermem_plugin_zip(plugin_zip, version="0.3.0")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RUNTIME_DIR", str(runtime_dir))
+    monkeypatch.setenv("CONTEXTSEEK_CLAUDE_CODE_COMMAND", str(fake_claude))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "1")
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_ZIP",
+        str(plugin_zip),
+    )
+
+    code = run_cli(
+        [
+            "plug-run",
+            "powermem",
+            "--linker",
+            "claude-code",
+            "--dry-run",
+            "--port",
+            "2997",
+            "--powermem-port",
+            "8997",
+            "--claude-args=--print",
+        ]
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    plugin_dir = (
+        tmp_path
+        / ".contextseek"
+        / "plugs"
+        / "powermem"
+        / "claude-code-plugin"
+        / "0.3.0"
+    )
+    assert payload["linker"] == "claude-code"
+    assert payload["plugin_dir"] == str(plugin_dir)
+    assert payload["target_command"] == [
+        str(fake_claude),
+        "--plugin-dir",
+        str(plugin_dir),
+        "--print",
     ]
+    assert payload["target_env"] == {
+        "POWERMEM_BASE_URL": "http://127.0.0.1:2997/plugins/powermem/default",
+        "POWERMEM_AGENT_ID": "claude-code",
+    }
+    assert "plug-serve" in payload["serve_command"]
+    assert "claude-code" in payload["serve_command"]
+    assert "claude-code-http" not in payload["serve_command"]
+    assert any(
+        "would extract Claude Code plugin zip" in action
+        for action in payload["actions"]
+    )
 
 
 def test_plug_serve_dry_run_without_linker_would_install_powermem_package(
@@ -1905,10 +2856,10 @@ def test_proxy_install_opencode_writes_opencode_mcp_schema(
     )
 
 
-def test_proxy_install_codex_writes_context_json(tmp_path, monkeypatch) -> None:
-    config = tmp_path / "context.json"
+def test_proxy_install_codex_writes_config_toml(tmp_path, monkeypatch) -> None:
+    config = tmp_path / "config.toml"
     config.write_text(
-        json.dumps({"contextProviders": {"keep": {"enabled": True}}}),
+        'model = "gpt-5"\n',
         encoding="utf-8",
     )
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CODEX_MCP_CONFIG", str(config))
@@ -1917,27 +2868,34 @@ def test_proxy_install_codex_writes_context_json(tmp_path, monkeypatch) -> None:
     result = plug.install(linker="codex")
 
     assert result.changed is True
-    payload = json.loads(config.read_text(encoding="utf-8"))
-    assert payload["contextProviders"]["keep"]["enabled"] is True
-    server = payload["mcpServers"]["powermem"]
-    assert _command_name(server["command"]) == "contextseek-pmem-mcp-stdio"
-    assert server["env"]["CONTEXTSEEK_POWERMEM_ENV_FILE"].endswith("powermem.env")
-    assert "CONTEXTSEEK_POWERMEM_UPSTREAM_BASE_URL" not in json.dumps(payload)
+    text = config.read_text(encoding="utf-8")
+    assert 'model = "gpt-5"' in text
+    assert "[mcp_servers.powermem]" in text
+    assert "contextseek-pmem-mcp-stdio" in text
+    assert "args = []" in text
+    assert "CONTEXTSEEK_POWERMEM_ENV_FILE" in text
+    assert "powermem.env" in text
+    assert "CONTEXTSEEK_POWERMEM_UPSTREAM_BASE_URL" not in text
 
 
 def test_proxy_install_codex_replaces_existing_mcp_server(
     tmp_path,
     monkeypatch,
 ) -> None:
-    config = tmp_path / "context.json"
+    config = tmp_path / "config.toml"
     config.write_text(
-        json.dumps(
-            {
-                "mcpServers": {
-                    "powermem": {"command": "old", "env": {"OLD": "1"}},
-                    "other": {"command": "keep"},
-                },
-            },
+        "\n".join(
+            [
+                'model = "gpt-5"',
+                "",
+                "[mcp_servers.powermem]",
+                'command = "old"',
+                'env = { OLD = "1" }',
+                "",
+                "[mcp_servers.other]",
+                'command = "keep"',
+                "",
+            ],
         ),
         encoding="utf-8",
     )
@@ -1947,14 +2905,35 @@ def test_proxy_install_codex_replaces_existing_mcp_server(
     result = plug.install(linker="codex")
 
     assert result.changed is True
-    payload = json.loads(config.read_text(encoding="utf-8"))
-    assert (
-        _command_name(payload["mcpServers"]["powermem"]["command"])
-        == "contextseek-pmem-mcp-stdio"
-    )
-    assert "OLD" not in payload["mcpServers"]["powermem"]["env"]
-    assert payload["mcpServers"]["other"]["command"] == "keep"
-    assert "CONTEXTSEEK_POWERMEM_UPSTREAM_BASE_URL" not in json.dumps(payload)
+    text = config.read_text(encoding="utf-8")
+    assert 'model = "gpt-5"' in text
+    assert "[mcp_servers.powermem]" in text
+    assert "contextseek-pmem-mcp-stdio" in text
+    assert "OLD" not in text
+    assert "[mcp_servers.other]" in text
+    assert 'command = "keep"' in text
+    assert "CONTEXTSEEK_POWERMEM_UPSTREAM_BASE_URL" not in text
+
+
+def test_proxy_install_codex_check_accepts_existing_proxy_with_env_drift(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from contextseek.plugs.powermem.linkers.codex import create_linker
+
+    config = tmp_path / "config.toml"
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CODEX_MCP_CONFIG", str(config))
+    linker = create_linker()
+
+    install_result = linker.configure_proxy(plug_name="powermem")
+    monkeypatch.setenv("CONTEXTSEEK_DESKTOP", "1")
+    check_result = linker.configure_proxy(plug_name="powermem", check=True)
+
+    assert install_result.changed is True
+    assert "CONTEXTSEEK_DESKTOP" not in config.read_text(encoding="utf-8")
+    assert check_result.changed is False
+    assert check_result.dry_run is True
+    assert not check_result.warnings
 
 
 def test_proxy_install_windsurf_writes_context_provider_config(

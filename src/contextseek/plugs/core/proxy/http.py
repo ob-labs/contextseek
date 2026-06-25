@@ -103,7 +103,16 @@ def create_plug_proxy_router(
                 instance_id,
                 proxy_request,
             )
-        response = plug.handle_search(proxy_request)
+        is_search_request = getattr(plug, "is_search_request", None)
+        contextseek_search = getattr(plug, "handle_contextseek_search", None)
+        if (
+            callable(is_search_request)
+            and is_search_request(proxy_request)
+            and callable(contextseek_search)
+        ):
+            response = contextseek_search(ctx, proxy_request)
+        else:
+            response = plug.handle_search(proxy_request)
         return JSONResponse(content=response.body, status_code=response.status_code)
 
     return router

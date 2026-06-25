@@ -44,6 +44,7 @@ class PythonPackageRuntimeInstaller:
     install_env_var: str | None = None
     install_command_env_var: str | None = None
     install_strategy_env_var: str | None = None
+    install_strategy_override: str | None = None
     managed_venv_env_var: str | None = None
     managed_venv_path: Path | None = None
     wheelhouse_env_var: str | None = None
@@ -86,6 +87,8 @@ class PythonPackageRuntimeInstaller:
         return self.display_name or self.package_name
 
     def install_strategy(self) -> str:
+        if self.install_strategy_override:
+            return self.install_strategy_override.lower().replace("-", "_")
         raw = (
             os.environ.get(self.install_strategy_env_var, "").strip()
             if self.install_strategy_env_var

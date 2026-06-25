@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -101,3 +102,147 @@ def test_ensure_desktop_config_does_not_overwrite_existing_file(
     assert config.read_text(encoding="utf-8") == (
         "STORAGE_BACKEND=file\nSTORAGE_PATH=/tmp/store\n"
     )
+
+
+def test_configure_desktop_runtime_marks_release_binary_auto(monkeypatch) -> None:
+    monkeypatch.delenv("CONTEXTSEEK_DESKTOP", raising=False)
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_RUNTIME_MODE", raising=False)
+
+    desktop._configure_desktop_runtime()
+
+    assert os.environ["CONTEXTSEEK_DESKTOP"] == "1"
+    assert os.environ["CONTEXTSEEK_POWERMEM_RUNTIME_MODE"] == "auto"
+
+
+def test_configure_desktop_powermem_proxy_url_uses_desktop_server(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "CONTEXTSEEK_POWERMEM_PROXY_BASE_URL",
+        "http://127.0.0.1:8000/plugins/powermem/default",
+    )
+
+    proxy_url = desktop._configure_desktop_powermem_proxy_url("0.0.0.0", 8123)
+
+    assert proxy_url == "http://127.0.0.1:8123/plugins/powermem/default"
+    assert os.environ["CONTEXTSEEK_POWERMEM_PROXY_BASE_URL"] == proxy_url
+
+
+def test_publish_desktop_powermem_hook_env_writes_runtime_url(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from contextseek.plugs.powermem.linkers import claude_code_plugin
+
+    monkeypatch.setattr(claude_code_plugin.Path, "home", lambda: tmp_path)
+    plugin_dir = tmp_path / "claude-plugin"
+    plugin_dir.mkdir()
+    installed_plugin_dir = tmp_path.joinpath(
+        ".claude",
+        "plugins",
+        "cache",
+        "powermem",
+        "memory-powermem",
+        "0.1.0",
+    )
+    installed_plugin_dir.mkdir(parents=True)
+    installed_plugins = tmp_path / ".claude" / "plugins" / "installed_plugins.json"
+    installed_plugins.parent.mkdir(parents=True, exist_ok=True)
+    installed_plugins.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "plugins": {
+                    "memory-powermem@powermem": [
+                        {"installPath": str(installed_plugin_dir), "version": "0.1.0"},
+                    ],
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        claude_code_plugin.ClaudeCodePluginRuntimeInstaller,
+        "prepared_plugin_dir",
+        lambda _self: plugin_dir,
+    )
+
+    desktop._publish_desktop_powermem_hook_env(
+        "http://127.0.0.1:8123/plugins/powermem/default",
+    )
+
+    runtime_env = plugin_dir / "config" / "runtime.env"
+    assert "POWERMEM_BASE_URL=http://127.0.0.1:8123/plugins/powermem/default" in (
+        runtime_env.read_text(encoding="utf-8")
+    )
+    global_runtime_env = tmp_path / ".powermem" / "runtime.env"
+    assert "POWERMEM_BASE_URL=http://127.0.0.1:8123/plugins/powermem/default" in (
+        global_runtime_env.read_text(encoding="utf-8")
+    )
+    cached_runtime_env = installed_plugin_dir / "config" / "runtime.env"
+    assert "POWERMEM_BASE_URL=http://127.0.0.1:8123/plugins/powermem/default" in (
+        cached_runtime_env.read_text(encoding="utf-8")
+    )
+
+
+def test_managed_powermem_http_runtime_starts_child_process(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from contextseek.plugs.powermem import runtime_manager
+
+    runtime_manager.stop_managed_powermem_http_runtime()
+    monkeypatch.delenv("CONTEXTSEEK_POWERMEM_UPSTREAM_BASE_URL", raising=False)
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_ENV_FILE", str(tmp_path / "pm.env"))
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_STARTUP_GRACE", "0")
+    server = tmp_path / "powermem-server"
+    server.write_text("#!/bin/sh\n", encoding="utf-8")
+    server.chmod(0o755)
+    created: list[object] = []
+
+    class FakeProcess:
+        pid = 4321
+        terminated = False
+
+        def poll(self):
+            return None if not self.terminated else 0
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self.terminated = True
+
+    def fake_popen(command, **kwargs):
+        created.append((command, kwargs))
+        return FakeProcess()
+
+    monkeypatch.setattr(
+        runtime_manager.PowerMemHTTPRuntimeInstaller,
+        "server_command",
+        lambda _self: [str(server)],
+    )
+    monkeypatch.setattr(runtime_manager.subprocess, "Popen", fake_popen)
+
+    try:
+        state = runtime_manager.start_managed_powermem_http_runtime(port=18123)
+        assert state is not None
+        assert state.pid == 4321
+        assert state.upstream_base_url == "http://127.0.0.1:18123"
+        assert os.environ["CONTEXTSEEK_POWERMEM_UPSTREAM_BASE_URL"] == (
+            "http://127.0.0.1:18123"
+        )
+        command, kwargs = created[0]
+        assert command == [
+            str(server),
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "18123",
+        ]
+        assert kwargs["cwd"] == tmp_path
+    finally:
+        runtime_manager.stop_managed_powermem_http_runtime()

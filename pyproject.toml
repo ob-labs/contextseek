@@ -22,6 +22,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
+    "certifi>=2024.2.2",
     "seekvfs>=0.1.0",
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",

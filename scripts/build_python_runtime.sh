@@ -70,6 +70,11 @@ if "${PY}" -c "import tiktoken" >/dev/null 2>&1; then
   )
 fi
 
+CERTIFI_ARGS=()
+if "${PY}" -c "import certifi" >/dev/null 2>&1; then
+  CERTIFI_ARGS+=(--collect-all certifi --copy-metadata certifi)
+fi
+
 "${PY}" -m PyInstaller \
   --noconfirm --clean --onefile \
   --name "${NAME}" \
@@ -79,6 +84,7 @@ fi
   --collect-all contextseek \
   ${SEEKDB_ARGS[@]+"${SEEKDB_ARGS[@]}"} \
   ${EMBED_ARGS[@]+"${EMBED_ARGS[@]}"} \
+  ${CERTIFI_ARGS[@]+"${CERTIFI_ARGS[@]}"} \
   "${WORK}/entry.py"
 
 cp "${WORK}/dist/${NAME}${EXE}" "${OUT_DIR}/${NAME}-${TRIPLE}${EXE}"

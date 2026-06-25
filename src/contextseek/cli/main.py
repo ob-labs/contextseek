@@ -405,6 +405,45 @@ def build_parser() -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
 
+    plug_run_parser = subparsers.add_parser(
+        "plug-run",
+        help="run a target agent through a ContextSeek-managed plug capability",
+    )
+    plug_run_parser.add_argument(
+        "plug",
+        nargs="?",
+        default="powermem",
+        choices=["powermem"],
+    )
+    plug_run_parser.add_argument("--linker", default="claude-code")
+    plug_run_parser.add_argument("--host", default="127.0.0.1")
+    plug_run_parser.add_argument("--port", type=int, default=2882)
+    plug_run_parser.add_argument("--scope", default=None)
+    plug_run_parser.add_argument("--powermem-host", default="127.0.0.1")
+    plug_run_parser.add_argument("--powermem-port", type=int, default=8000)
+    plug_run_parser.add_argument("--powermem-command", default=None)
+    plug_run_parser.add_argument("--powermem-upstream-base-url", default=None)
+    plug_run_parser.add_argument("--proxy-base-url", default=None)
+    plug_run_parser.add_argument("--dry-run", action="store_true")
+    plug_run_parser.add_argument("--log-level", default="info")
+    plug_run_parser.add_argument(
+        "--startup-grace",
+        type=float,
+        default=1.0,
+        help=argparse.SUPPRESS,
+    )
+    plug_run_parser.add_argument(
+        "--powermem-startup-grace",
+        type=float,
+        default=0.5,
+        help=argparse.SUPPRESS,
+    )
+    plug_run_parser.add_argument(
+        "--claude-args",
+        default="",
+        help="extra arguments passed to Claude Code",
+    )
+
     # desktop-server — single-process backend for the desktop app: serves the
     # API and the built dashboard SPA from one origin.
     desktop_parser = subparsers.add_parser(
@@ -443,6 +482,11 @@ def run_cli(
         from contextseek.plugs.powermem.serve import run_powermem_serve
 
         return run_powermem_serve(args)
+
+    if args.command == "plug-run":
+        from contextseek.plugs.powermem.run import run_powermem_run
+
+        return run_powermem_run(args)
 
     settings = ContextSeekSettings()
 
@@ -1154,6 +1198,7 @@ def _plug_install_status(warnings: list[str]) -> int:
         "Claude Code CLI cannot be found",
         "failed to install Claude Code plugin",
         "failed to enable Claude Code plugin",
+        "failed to prepare Claude Code plugin dir",
         "Claude Code plugin",
         "OpenClaw CLI cannot be found",
         "failed to install OpenClaw plugin",

@@ -205,15 +205,6 @@ def _contextseek_proxy_env(plan: PowerMemServePlan) -> dict[str, str]:
 
 def _start_powermem_server(plan: PowerMemServePlan) -> subprocess.Popen[str]:
     env = powermem_child_process_env()
-    print(
-        "[contextseek] starting PowerMem upstream: "
-        + " ".join(shlex.quote(part) for part in plan.powermem_command),
-        flush=True,
-    )
-    print(
-        f"[contextseek] PowerMem env: {plan.managed_env_path}",
-        flush=True,
-    )
     return subprocess.Popen(  # noqa: S603
         plan.powermem_command,
         env=env,
@@ -224,6 +215,7 @@ def _start_powermem_server(plan: PowerMemServePlan) -> subprocess.Popen[str]:
 
 def _run_contextseek_http(plan: PowerMemServePlan, *, log_level: str) -> int:
     os.environ.update(_contextseek_proxy_env(plan))
+    _publish_claude_code_hook_env(plan)
     try:
         import uvicorn
 
@@ -237,14 +229,6 @@ def _run_contextseek_http(plan: PowerMemServePlan, *, log_level: str) -> int:
             flush=True,
         )
         return 1
-    print(
-        f"[contextseek] serving PowerMem proxy at {plan.proxy_base_url}",
-        flush=True,
-    )
-    print(
-        f"[contextseek] forwarding to internal PowerMem at {plan.upstream_base_url}",
-        flush=True,
-    )
     uvicorn.run(
         create_app(),
         host=plan.contextseek_host,
@@ -252,6 +236,23 @@ def _run_contextseek_http(plan: PowerMemServePlan, *, log_level: str) -> int:
         log_level=log_level,
     )
     return 0
+
+
+def _publish_claude_code_hook_env(plan: PowerMemServePlan) -> None:
+    if plan.linker not in {"claude-code", "claude-code-http"}:
+        return
+    try:
+        from contextseek.plugs.powermem.linkers.claude_code_plugin import (
+            write_claude_code_plugin_runtime_envs,
+        )
+
+        write_claude_code_plugin_runtime_envs(plan.proxy_base_url)
+    except Exception as exc:  # pragma: no cover - defensive serve bootstrap
+        print(
+            f"[contextseek] PowerMem hook env update skipped: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _terminate_process(process: subprocess.Popen[str]) -> None:
@@ -303,6 +304,7 @@ def _status_from_warnings(warnings: list[str]) -> int:
         "Claude Code CLI cannot be found",
         "failed to install Claude Code plugin",
         "failed to enable Claude Code plugin",
+        "failed to prepare Claude Code plugin dir",
         "Claude Code plugin",
         "OpenClaw CLI cannot be found",
         "failed to install OpenClaw plugin",

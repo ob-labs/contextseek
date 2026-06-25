@@ -527,7 +527,7 @@ def to_strategy_config(settings: ContextSeekSettings) -> "StrategyConfig":
     return StrategyConfig(
         retrieval=RetrievalStrategy(
             default_k=settings.retrieval.default_k,
-            recall_routes=tuple(settings.retrieval.recall_routes),
+            recall_routes=_effective_recall_routes(settings),
             candidate_multiplier=settings.retrieval.candidate_multiplier,
             vector_weight=settings.retrieval.vector_weight,
             fts_weight=settings.retrieval.fts_weight,
@@ -602,6 +602,27 @@ def to_strategy_config(settings: ContextSeekSettings) -> "StrategyConfig":
             compact_min_items=settings.lifecycle.compact_min_items,
         ),
     )
+
+
+def _effective_recall_routes(settings: ContextSeekSettings) -> tuple[str, ...]:
+    routes = list(settings.retrieval.recall_routes)
+    embedding_enabled = _embedding_configured(settings.embedding)
+    if not embedding_enabled:
+        routes = [route for route in routes if route != "vector"]
+        return tuple(routes or ["phrase", "terms"])
+    fields_set = getattr(settings.retrieval, "model_fields_set", set())
+    if "recall_routes" not in fields_set and "vector" not in routes:
+        routes.append("vector")
+    return tuple(routes)
+
+
+def _embedding_configured(settings: EmbeddingSettings) -> bool:
+    provider = (settings.provider or "").strip().lower()
+    if provider in {"", "none"}:
+        return False
+    if provider == "langchain" and not settings.class_path.strip():
+        return False
+    return True
 
 
 __all__ = [

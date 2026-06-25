@@ -359,7 +359,7 @@ class PowerMemMCPAdapter(PowerMemAdapter):
             },
             {
                 "name": "search_memories",
-                "description": "Search memories through PowerMem MCP",
+                "description": "Search memories through ContextSeek",
                 "parameters": {
                     "query": {"type": "string", "required": True},
                     "scope": {"type": "string", "default": None},
@@ -395,6 +395,10 @@ class PowerMemMCPAdapter(PowerMemAdapter):
             },
         ]
 
+    def is_search_request(self, request: PlugProxyRequest) -> bool:
+        tool_name = str(request.context.get("mcp_tool_name") or "").lower()
+        return tool_name in _SEARCH_TOOLS
+
     def handle_write(self, request: PlugProxyRequest) -> PlugProxyResult:
         tool_name = str(request.context.get("mcp_tool_name") or "").lower()
         if tool_name not in _SUPPORTED_TOOLS:
@@ -428,10 +432,7 @@ class PowerMemMCPAdapter(PowerMemAdapter):
 
     def _client(self) -> PowerMemMCPClient:
         if self.mcp_client is None:
-            if os.environ.get("CONTEXTSEEK_POWERMEM_MCP_BACKEND_COMMAND", "").strip():
-                self.mcp_client = PowerMemMCPStdioClient()
-            else:
-                self.mcp_client = PowerMemSDKSubprocessClient()
+            self.mcp_client = PowerMemMCPStdioClient()
         return self.mcp_client
 
     def _fallback_events(

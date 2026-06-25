@@ -195,6 +195,36 @@ def _configure_desktop_path() -> None:
         os.environ["PATH"] = os.pathsep.join([*additions, *existing])
 
 
+def _configure_desktop_runtime() -> None:
+    """Mark the process as desktop so plug runtimes can avoid Python venv setup."""
+    os.environ.setdefault("CONTEXTSEEK_DESKTOP", "1")
+    os.environ.setdefault("CONTEXTSEEK_POWERMEM_RUNTIME_MODE", "auto")
+
+
+def _configure_desktop_powermem_proxy_url(host: str, port: int) -> str:
+    """Point PowerMem-capable agents at this desktop server's proxy route."""
+    url_host = "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
+    proxy_url = f"http://{url_host}:{port}/plugins/powermem/default"
+    os.environ["CONTEXTSEEK_POWERMEM_PROXY_BASE_URL"] = proxy_url
+    return proxy_url
+
+
+def _publish_desktop_powermem_hook_env(proxy_url: str) -> None:
+    """Publish the live desktop proxy URL for Claude Code HTTP hooks."""
+    try:
+        from contextseek.plugs.powermem.linkers.claude_code_plugin import (
+            write_claude_code_plugin_runtime_envs,
+        )
+
+        write_claude_code_plugin_runtime_envs(proxy_url)
+    except Exception as exc:  # pragma: no cover - defensive desktop bootstrap
+        print(
+            f"[desktop-server] PowerMem hook env update skipped: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
 def _desktop_cli_search_paths() -> list[Path]:
     home = Path.home()
     paths = [
@@ -268,6 +298,7 @@ def run_desktop_server(args: argparse.Namespace) -> int:
     )
     data_dir.mkdir(parents=True, exist_ok=True)
     _ensure_desktop_config(data_dir)
+    _configure_desktop_runtime()
     _configure_desktop_path()
 
     backend = _configure_storage(data_dir)
@@ -275,6 +306,22 @@ def run_desktop_server(args: argparse.Namespace) -> int:
     port = args.port
     if port is None:
         port = int(os.environ.get("CTX_DESKTOP_PORT", "8000"))
+    proxy_url = _configure_desktop_powermem_proxy_url(args.host, port)
+    _publish_desktop_powermem_hook_env(proxy_url)
+    try:
+        from contextseek.plugs.powermem.runtime_manager import (
+            start_managed_powermem_http_runtime,
+            stop_managed_powermem_http_runtime,
+        )
+
+        start_managed_powermem_http_runtime()
+    except Exception as exc:  # pragma: no cover - defensive desktop bootstrap
+        print(
+            f"[desktop-server] PowerMem runtime autostart skipped: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        stop_managed_powermem_http_runtime = None  # type: ignore[assignment]
 
     try:
         import uvicorn
@@ -295,10 +342,14 @@ def run_desktop_server(args: argparse.Namespace) -> int:
         f"listening on http://{args.host}:{port}",
         flush=True,
     )
-    uvicorn.run(
-        create_app(),
-        host=args.host,
-        port=port,
-        log_level=args.log_level,
-    )
+    try:
+        uvicorn.run(
+            create_app(),
+            host=args.host,
+            port=port,
+            log_level=args.log_level,
+        )
+    finally:
+        if stop_managed_powermem_http_runtime is not None:
+            stop_managed_powermem_http_runtime()
     return 0

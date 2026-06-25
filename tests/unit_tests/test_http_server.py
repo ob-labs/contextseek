@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -72,6 +73,12 @@ def _wait_plug_job(app, job_id: str) -> dict[str, object]:
 def _clear_plug_status_cache() -> None:
     http_server._POWERMEM_STATUS_CACHE.clear()
     http_server._POWERMEM_STATUS_CACHE_UPDATED_AT = None
+
+
+@pytest.fixture(autouse=True)
+def _managed_powermem_runtime(monkeypatch) -> None:
+    monkeypatch.delenv("CONTEXTSEEK_DESKTOP", raising=False)
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_RUNTIME_MODE", "managed_venv")
 
 
 def _fake_command(path, body: str = "exit 0") -> None:
@@ -241,6 +248,42 @@ def test_http_update_config_normalizes_embedding_none(monkeypatch, tmp_path) -> 
     assert 'EMBEDDING_KWARGS={"api_key": ""}\n' in contents
 
 
+def test_http_update_config_desktop_schedules_restart(monkeypatch, tmp_path) -> None:
+    env_path = tmp_path / "config.env"
+    env_path.write_text(
+        "EMBEDDING_PROVIDER=none\nEMBEDDING_MODEL=none\n",
+        encoding="utf-8",
+    )
+    scheduled: list[float] = []
+    monkeypatch.setenv("CONTEXTSEEK_CONFIG", str(env_path))
+    monkeypatch.setenv("CONTEXTSEEK_DESKTOP", "1")
+    monkeypatch.setattr(
+        http_server,
+        "_schedule_server_restart",
+        lambda delay_seconds=0.8: scheduled.append(delay_seconds),
+    )
+    ctx = MagicMock(name="ContextSeek")
+    app = create_app(client=ctx)
+
+    res = _asgi_put(
+        app,
+        "/config",
+        json={
+            "embedding_provider": "openai",
+            "embedding_model": "text-embedding-3-small",
+            "embedding_dims": "1536",
+        },
+    )
+
+    assert res.status_code == 200
+    assert res.json() == {
+        "status": "ok",
+        "restart_required": False,
+        "restart_scheduled": True,
+    }
+    assert scheduled == [0.8]
+
+
 def test_http_update_config_rejects_enabled_embedding_without_model(
     monkeypatch, tmp_path
 ) -> None:
@@ -316,6 +359,115 @@ def test_http_plug_install_returns_job_and_linker_result(monkeypatch, tmp_path) 
         "blocker_stage": None,
         "blocker_code": None,
     }
+
+
+def test_http_plug_install_reports_runtime_download_progress(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _clear_plug_status_cache()
+    cursor = tmp_path / "cursor"
+    cursor.write_text("#!/bin/sh\n", encoding="utf-8")
+    cursor.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    progress_seen = threading.Event()
+    finish_install = threading.Event()
+    callback_found: list[bool] = []
+
+    def fake_install(self, *, linker=None, dry_run=False, check=False):
+        from contextseek.plugs.powermem.linkers import runtime as powermem_runtime
+
+        callback = powermem_runtime._DOWNLOAD_PROGRESS_CALLBACK.get()
+        callback_found.append(callback is not None)
+        if callback is not None:
+            callback("powermem-test.tar.gz", 5, 20)
+        progress_seen.set()
+        finish_install.wait(timeout=2)
+        return InstallResult(
+            changed=True,
+            dry_run=False,
+            actions=["install test linker"],
+            warnings=[],
+        )
+
+    monkeypatch.setattr(
+        "contextseek.plugs.powermem.PowerMemAdapter.install",
+        fake_install,
+    )
+    ctx = MagicMock(name="ContextSeek")
+    app = create_app(client=ctx)
+
+    res = _asgi_post(
+        app,
+        "/plugs/powermem/install",
+        json={"linker": "cursor"},
+    )
+
+    assert res.status_code == 200
+    body = res.json()
+    assert progress_seen.wait(timeout=2)
+    progress = _asgi_get(app, f"/plugs/jobs/{body['job_id']}").json()
+    assert callback_found == [True]
+    assert progress["status"] == "running"
+    assert progress["phase"] == "runtime"
+    assert progress["progress_label"] == "powermem-test.tar.gz"
+    assert progress["progress_current"] == 5
+    assert progress["progress_total"] == 20
+
+    finish_install.set()
+    job = _wait_plug_job(app, body["job_id"])
+    assert job["status"] == "succeeded"
+    assert job["progress_label"] is None
+
+
+def test_http_plug_install_starts_desktop_powermem_runtime(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _clear_plug_status_cache()
+    cursor = tmp_path / "cursor"
+    cursor.write_text("#!/bin/sh\n", encoding="utf-8")
+    cursor.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setenv("CONTEXTSEEK_DESKTOP", "1")
+    started: list[bool] = []
+
+    def fake_install(self, *, linker=None, dry_run=False, check=False):
+        return InstallResult(
+            changed=True,
+            dry_run=False,
+            actions=["install test linker"],
+            warnings=[],
+        )
+
+    def fake_start():
+        started.append(True)
+        return SimpleNamespace(upstream_base_url="http://127.0.0.1:18123")
+
+    monkeypatch.setattr(
+        "contextseek.plugs.powermem.PowerMemAdapter.install",
+        fake_install,
+    )
+    monkeypatch.setattr(
+        "contextseek.plugs.powermem.runtime_manager.start_managed_powermem_http_runtime",
+        fake_start,
+    )
+    ctx = MagicMock(name="ContextSeek")
+    app = create_app(client=ctx)
+
+    res = _asgi_post(
+        app,
+        "/plugs/powermem/install",
+        json={"linker": "cursor"},
+    )
+
+    assert res.status_code == 200
+    job = _wait_plug_job(app, res.json()["job_id"])
+    assert job["status"] == "succeeded"
+    assert started == [True]
+    assert job["actions"][-1] == (
+        "start managed PowerMem upstream: http://127.0.0.1:18123"
+    )
 
 
 def test_http_plug_install_fails_fast_when_target_missing(
@@ -420,17 +572,15 @@ def test_http_plug_status_returns_checking_without_full_check(
     calls: list[dict[str, object]] = []
 
     def fake_available_linker_names():
-        return ["qoder"]
+        return ["codex"]
 
     def fake_install(self, *, linker=None, dry_run=False, check=False):
         calls.append({"linker": linker, "dry_run": dry_run, "check": check})
         return InstallResult(
             changed=False,
             dry_run=True,
-            actions=["skip Qoder MCP config"],
-            warnings=[
-                "Qoder MCP config path is not verified; no default file was written"
-            ],
+            actions=["skip Codex MCP config"],
+            warnings=["Codex MCP config path is not verified"],
         )
 
     monkeypatch.setattr(
@@ -450,7 +600,7 @@ def test_http_plug_status_returns_checking_without_full_check(
     assert calls == []
     assert res.json()["entries"] == [
         {
-            "linker": "qoder",
+            "linker": "codex",
             "status": "checking",
             "changed": False,
             "dry_run": True,
@@ -470,16 +620,14 @@ def test_http_plug_status_refresh_classifies_missing_target(
     monkeypatch.setenv("PATH", str(tmp_path))
 
     def fake_available_linker_names():
-        return ["qoder"]
+        return ["codex"]
 
     def fake_install(self, *, linker=None, dry_run=False, check=False):
         return InstallResult(
             changed=False,
             dry_run=True,
-            actions=["skip Qoder MCP config"],
-            warnings=[
-                "Qoder MCP config path is not verified; no default file was written"
-            ],
+            actions=["skip Codex MCP config"],
+            warnings=["Codex MCP config path is not verified"],
         )
 
     monkeypatch.setattr(
@@ -504,12 +652,12 @@ def test_http_plug_status_refresh_classifies_missing_target(
     assert job["progress_total"] == 1
     assert job["entries"] == [
         {
-            "linker": "qoder",
+            "linker": "codex",
             "status": "needs_action",
             "changed": False,
             "dry_run": True,
-            "actions": ["detect target runtime: Qoder"],
-            "warnings": ["Qoder CLI cannot be found; install Qoder"],
+            "actions": ["detect target runtime: Codex"],
+            "warnings": ["Codex CLI cannot be found; install Codex"],
             "blocker_stage": "target",
             "blocker_code": "target_not_detected",
         }
@@ -572,9 +720,10 @@ def test_http_plug_status_refresh_detects_missing_targets_for_all_linkers(
     job = _wait_plug_job(app, res.json()["job_id"])
     assert calls == []
     assert job["status"] == "succeeded"
-    assert job["progress_current"] == len(linkers)
-    assert job["progress_total"] == len(linkers)
-    assert [entry["linker"] for entry in job["entries"]] == linkers
+    expected_refresh_linkers = ["claude-code", "codex"]
+    assert job["progress_current"] == len(expected_refresh_linkers)
+    assert job["progress_total"] == len(expected_refresh_linkers)
+    assert [entry["linker"] for entry in job["entries"]] == expected_refresh_linkers
     assert {entry["status"] for entry in job["entries"]} == {"needs_action"}
     assert {entry["blocker_stage"] for entry in job["entries"]} == {"target"}
     assert {entry["blocker_code"] for entry in job["entries"]} == {
@@ -625,6 +774,7 @@ exit 0
         "qoder",
     ]
     config_env = {
+        "CONTEXTSEEK_POWERMEM_CLAUDE_CODE_SETTINGS": tmp_path / "claude-settings.json",
         "CONTEXTSEEK_POWERMEM_CURSOR_MCP_CONFIG": tmp_path / "cursor-mcp.json",
         "CONTEXTSEEK_POWERMEM_VSCODE_MCP_CONFIG": tmp_path / "vscode-mcp.json",
         "CONTEXTSEEK_POWERMEM_CODEX_MCP_CONFIG": tmp_path / "codex-context.json",
@@ -644,6 +794,7 @@ exit 0
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLI", str(bin_dir / "pmem"))
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_ENV_FILE", str(tmp_path / "powermem.env"))
     monkeypatch.setenv("CONTEXTSEEK_POWERMEM_PACKAGE_INSTALL", "0")
+    monkeypatch.setenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_PLUGIN_INSTALL", "0")
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.setenv("LLM_MODEL", "llama3.1")
     monkeypatch.delenv("CONTEXTSEEK_POWERMEM_CLAUDE_CODE_MCP_CONFIG", raising=False)
@@ -675,11 +826,14 @@ exit 0
     assert res.status_code == 200
     job = _wait_plug_job(app, res.json()["job_id"])
     assert job["status"] == "succeeded"
-    assert job["progress_current"] == len(linkers)
-    assert job["progress_total"] == len(linkers)
-    assert [entry["linker"] for entry in job["entries"]] == linkers
-    assert {entry["status"] for entry in job["entries"]} == {"connected"}
-    assert {entry["changed"] for entry in job["entries"]} == {False}
+    expected_refresh_linkers = ["claude-code", "codex"]
+    assert job["progress_current"] == len(expected_refresh_linkers)
+    assert job["progress_total"] == len(expected_refresh_linkers)
+    assert [entry["linker"] for entry in job["entries"]] == expected_refresh_linkers
+    statuses = {entry["linker"]: entry["status"] for entry in job["entries"]}
+    assert set(statuses.values()) == {"connected"}
+    changed = {entry["linker"]: entry["changed"] for entry in job["entries"]}
+    assert set(changed.values()) == {False}
     assert all(not entry["warnings"] for entry in job["entries"])
 
     status = _asgi_get(app, "/plugs/powermem")

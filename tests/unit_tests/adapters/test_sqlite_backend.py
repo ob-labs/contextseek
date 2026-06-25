@@ -94,6 +94,30 @@ def test_vector_search(backend: SQLiteBackend) -> None:
     assert hits.hits[0].path == "contextseek://s/aaa"
 
 
+def test_update_without_embedding_preserves_existing_vector(tmp_path) -> None:
+    backend = SQLiteBackend(path=str(tmp_path / "t.sqlite3"))
+    backend.initialize()
+    try:
+        payload = json.loads(_item("s", "aaa", "x", "h1"))
+        payload["embedding"] = [1.0, 0.0, 0.0]
+        backend.write("contextseek://s/aaa", json.dumps(payload))
+
+        payload.pop("embedding")
+        payload["content"] = "x touched"
+        backend.write("contextseek://s/aaa", json.dumps(payload))
+
+        hits = backend.search(
+            "",
+            path_pattern="contextseek://s/*",
+            limit=5,
+            query_embedding=[1.0, 0.0, 0.0],
+        )
+    finally:
+        backend.close()
+
+    assert hits.hits[0].path == "contextseek://s/aaa"
+
+
 def test_delete(backend: SQLiteBackend) -> None:
     backend.write("contextseek://me/x", _item("me", "a", "x", "h1"))
     backend.delete("contextseek://me/x")

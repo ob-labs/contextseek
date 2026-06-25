@@ -32,7 +32,9 @@ _READ_COMMANDS = {"search", "get", "list", "show", "health"}
 _OPTIONS_WITH_VALUES = {
     "-a",
     "-f",
+    "-k",
     "-m",
+    "-q",
     "-r",
     "-u",
     "--agent-id",
@@ -46,8 +48,10 @@ _OPTIONS_WITH_VALUES = {
     "--memory-type",
     "--metadata",
     "--run-id",
+    "--query",
     "--scope",
     "--threshold",
+    "--top-k",
     "--user-id",
 }
 
@@ -104,9 +108,14 @@ class PowerMemCLIAdapter(PowerMemAdapter):
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    child_env = _child_env_for_args(args)
+    if _command_from_argv(args) == "search":
+        return _run_contextseek_search(args, child_env)
+
     executable = resolve_executable(
         env_names=["CONTEXTSEEK_POWERMEM_CLI", "CONTEXTSEEK_REAL_PMEM", "PMEM_PATH"],
         fallback="pmem",
+        env=child_env,
     )
     if not executable:
         warning(
@@ -123,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
 
     result = run_cli(
         [executable, *args],
-        env=powermem_child_process_env(),
+        env=child_env,
         cwd=powermem_child_process_cwd(),
     )
     emit_cli_result(result)
@@ -131,8 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         return result.returncode
 
     adapter = PowerMemCLIAdapter(
-        instance_id=os.environ.get("CONTEXTSEEK_POWERMEM_INSTANCE_ID", "default"),
-        default_scope=os.environ.get("CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE"),
+        instance_id=child_env.get("CONTEXTSEEK_POWERMEM_INSTANCE_ID", "default"),
+        default_scope=child_env.get("CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE"),
     )
     try:
         events = adapter.events_from_cli_success(args, result.stdout)
@@ -140,6 +149,49 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001
         warning("failed to materialize PowerMem CLI changes", detail=exc)
     return result.returncode
+
+
+def _run_contextseek_search(argv: list[str], env: dict[str, str]) -> int:
+    adapter = PowerMemCLIAdapter(
+        instance_id=env.get("CONTEXTSEEK_POWERMEM_INSTANCE_ID", "default"),
+        default_scope=env.get("CONTEXTSEEK_POWERMEM_DEFAULT_SCOPE"),
+    )
+    body = _request_body_from_argv(argv)
+    if "query" not in body and "memory" in body:
+        body["query"] = body["memory"]
+    request = PlugProxyRequest(
+        method="CLI",
+        path="cli://search",
+        body=body,
+        headers={},
+        query={},
+        context={"cli_command": "search"},
+    )
+    try:
+        response = adapter.handle_contextseek_search(_contextseek_client(), request)
+    except Exception as exc:  # noqa: BLE001
+        warning("failed to search ContextSeek", detail=exc)
+        return 1
+    sys.stdout.write(json.dumps(response.body, ensure_ascii=False) + "\n")
+    return 0
+
+
+def _contextseek_client():
+    from contextseek import ContextSeek
+
+    return ContextSeek.from_settings()
+
+
+def _child_env_for_args(argv: list[str]) -> dict[str, str]:
+    base = dict(os.environ)
+    env_file = (
+        _value_after(argv, ["--env-file", "-f"])
+        or base.get("CONTEXTSEEK_POWERMEM_ENV_FILE")
+        or base.get("POWERMEM_ENV_FILE")
+    )
+    if env_file:
+        base["CONTEXTSEEK_POWERMEM_ENV_FILE"] = env_file
+    return powermem_child_process_env(base)
 
 
 def _command_from_argv(argv: list[str]) -> str | None:
@@ -180,6 +232,8 @@ def _request_body_from_argv(argv: list[str]) -> dict[str, Any]:
     for target, names in {
         "id": ["--id", "--memory-id"],
         "memory": ["--memory", "--content"],
+        "query": ["--query", "-q"],
+        "limit": ["--limit", "-k", "--top-k"],
         "scope": ["--scope"],
         "user_id": ["--user-id", "-u"],
         "agent_id": ["--agent-id", "-a"],

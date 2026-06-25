@@ -242,7 +242,7 @@ class SQLiteBackend(SyncCapableMixin, BackendProtocol):
                 "summary=excluded.summary, payload_json=excluded.payload_json, "
                 "scope=excluded.scope, stage=excluded.stage, "
                 "searchable=excluded.searchable, hash=excluded.hash, "
-                "embedding=excluded.embedding",
+                "embedding=COALESCE(excluded.embedding, context_items.embedding)",
                 (
                     path,
                     row["namespace"],

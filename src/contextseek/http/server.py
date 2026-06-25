@@ -197,16 +197,7 @@ _API_ROOT_SEGMENTS: set[str] = {
 
 _POWERMEM_STATUS_LINKERS = [
     "claude-code",
-    "cursor",
-    "vscode",
     "codex",
-    "windsurf",
-    "github-copilot",
-    "opencode",
-    "claude-desktop",
-    "cline",
-    "openclaw",
-    "qoder",
 ]
 
 _POWERMEM_TARGET_COMMANDS: dict[str, tuple[str, ...]] = {
@@ -263,6 +254,7 @@ class PlugInstallJob:
     entries: list[dict[str, Any]] = field(default_factory=list)
     progress_current: int = 0
     progress_total: int = 0
+    progress_label: str | None = None
     result: dict[str, Any] | None = None
     error: str | None = None
     created_at: str = field(default_factory=lambda: _utc_now_iso())
@@ -282,6 +274,7 @@ class PlugInstallJob:
             "entries": [_clone_plug_result(entry) for entry in self.entries],
             "progress_current": self.progress_current,
             "progress_total": self.progress_total,
+            "progress_label": self.progress_label,
             "result": self.result,
             "error": self.error,
             "created_at": self.created_at,
@@ -359,6 +352,8 @@ def _classify_plug_warning(warnings: list[str]) -> tuple[str | None, str | None]
         return "target", "target_not_detected"
     if "cannot be inferred; set contextseek_powermem_cli" in text:
         return "runtime", "powermem_runtime_missing"
+    if "powerMem release binary".lower() in text or "release binary" in text:
+        return "runtime", "powermem_runtime_failed"
     if "cannot be inferred" in text:
         return "runtime", "powermem_env_missing"
     if "failed to create managed python runtime" in text:
@@ -512,6 +507,47 @@ def _run_powermem_linker(
     )
 
 
+def _powermem_install_progress_callback(
+    *,
+    job_id: str,
+    linker: str,
+) -> Any:
+    def _callback(label: str, current: int, total: int) -> None:
+        _update_job(
+            job_id,
+            status="running",
+            phase="runtime",
+            actions=[
+                f"detect target runtime: {linker}",
+                f"download PowerMem package: {label}",
+            ],
+            progress_current=max(current, 0),
+            progress_total=max(total, 0),
+            progress_label=label,
+        )
+
+    return _callback
+
+
+def _maybe_start_desktop_powermem_runtime() -> str | None:
+    if os.environ.get("CONTEXTSEEK_DESKTOP", "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        return None
+    try:
+        from contextseek.plugs.powermem.runtime_manager import (
+            start_managed_powermem_http_runtime,
+        )
+
+        state = start_managed_powermem_http_runtime()
+    except Exception:
+        return None
+    return state.upstream_base_url if state is not None else None
+
+
 def _create_plug_install_job(plug: str, req: PlugInstallRequest) -> PlugInstallJob:
     from contextseek.plugs.powermem.linkers import normalize_linker_name
 
@@ -587,23 +623,39 @@ def _run_plug_install_job(
             phase="runtime",
             actions=[f"detect target runtime: {job.linker}"],
         )
-        result = _run_powermem_linker(
-            linker=job.linker,
-            dry_run=dry_run,
-            check=check,
-            probe_target=False,
+        from contextseek.plugs.powermem.linkers.runtime import (
+            power_mem_download_progress,
         )
+
+        with power_mem_download_progress(
+            _powermem_install_progress_callback(
+                job_id=job_id,
+                linker=job.linker,
+            )
+        ):
+            result = _run_powermem_linker(
+                linker=job.linker,
+                dry_run=dry_run,
+                check=check,
+                probe_target=False,
+            )
         terminal_status = (
             "failed" if result["status"] == "needs_action" else "succeeded"
         )
+        actions = list(result.get("actions") or [])
+        if terminal_status == "succeeded" and not (dry_run or check):
+            upstream_url = _maybe_start_desktop_powermem_runtime()
+            if upstream_url:
+                actions.append(f"start managed PowerMem upstream: {upstream_url}")
         _cache_powermem_status_result(result)
         _update_job(
             job_id,
             status=terminal_status,
             phase=result.get("blocker_stage") or "done",
-            actions=list(result.get("actions") or []),
+            actions=actions,
             warnings=list(result.get("warnings") or []),
             result=result,
+            progress_label=None,
         )
     except Exception as exc:  # pragma: no cover - defensive worker boundary
         result = _plug_install_result_payload(
@@ -620,6 +672,7 @@ def _run_plug_install_job(
             warnings=list(result.get("warnings") or []),
             result=result,
             error=str(exc),
+            progress_label=None,
         )
 
 
@@ -904,6 +957,52 @@ def _server_argv() -> list[str]:
 def _running_with_reload() -> bool:
     argv = [str(arg) for arg in [*getattr(sys, "orig_argv", []), *sys.argv]]
     return "--reload" in argv
+
+
+def _is_desktop_runtime() -> bool:
+    marker = os.environ.get("CONTEXTSEEK_DESKTOP", "").strip().lower()
+    if marker in {"1", "true", "yes", "on"}:
+        return True
+    return bool(os.environ.get("CTX_DASHBOARD_DIST", "").strip())
+
+
+def _schedule_server_restart(delay_seconds: float = 0.8) -> None:
+    import asyncio
+
+    asyncio.create_task(_restart_current_server(delay_seconds=delay_seconds))
+
+
+async def _restart_current_server(*, delay_seconds: float = 0.8) -> None:
+    """Restart this server process so config-backed singletons are rebuilt."""
+    import asyncio
+    import shutil
+    import subprocess
+
+    await asyncio.sleep(delay_seconds)
+
+    # Restart background daemon if it's running (config change affects it too)
+    try:
+        from contextseek.daemon.process import DaemonProcess
+
+        daemon = DaemonProcess()
+        if daemon.is_running():
+            daemon.stop()
+            await asyncio.sleep(0.3)
+            bin_path = shutil.which("contextseek") or sys.argv[0]
+            subprocess.Popen(
+                [bin_path, "daemon", "start"],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+    except Exception:
+        pass
+
+    if _running_with_reload():
+        os.utime(__file__, None)
+        return
+
+    os.execv(sys.executable, _server_argv())
 
 
 def create_app(client: ContextSeek | None = None) -> FastAPI:
@@ -1431,7 +1530,15 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
             _update_env_file(updates)
         except FileNotFoundError as e:
             raise HTTPException(status_code=500, detail=str(e)) from e
-        return {"status": "ok", "restart_required": True}
+        restart_scheduled = False
+        if _is_desktop_runtime():
+            _schedule_server_restart()
+            restart_scheduled = True
+        return {
+            "status": "ok",
+            "restart_required": not restart_scheduled,
+            "restart_scheduled": restart_scheduled,
+        }
 
     @app.post("/config/test")
     async def test_config_connection(req: ConfigTestRequest) -> dict[str, Any]:
@@ -1576,38 +1683,7 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
         invocations keep their import semantics.  If the background daemon is
         also running it is restarted separately so both processes reload config.
         """
-        import asyncio
-        import shutil
-        import subprocess
-
-        async def _do_restart() -> None:
-            await asyncio.sleep(0.8)
-
-            # Restart background daemon if it's running (config change affects it too)
-            try:
-                from contextseek.daemon.process import DaemonProcess
-
-                daemon = DaemonProcess()
-                if daemon.is_running():
-                    daemon.stop()
-                    await asyncio.sleep(0.3)
-                    bin_path = shutil.which("contextseek") or sys.argv[0]
-                    subprocess.Popen(
-                        [bin_path, "daemon", "start"],
-                        start_new_session=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-            except Exception:
-                pass
-
-            if _running_with_reload():
-                os.utime(__file__, None)
-                return
-
-            os.execv(sys.executable, _server_argv())
-
-        asyncio.create_task(_do_restart())
+        _schedule_server_restart()
         return {"status": "restarting"}
 
     @app.get("/health")

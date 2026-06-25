@@ -47,6 +47,7 @@ class PowerMemHTTPPlug(PowerMemAdapter):
     timeout: float = 30.0
 
     def handle_write(self, request: PlugProxyRequest) -> PlugProxyResult:
+        request = self.prepare_write_request(request)
         response = self._request_json(request)
         if not 200 <= response.status_code < 300:
             return PlugProxyResult(response=response, events=[])
@@ -58,12 +59,22 @@ class PowerMemHTTPPlug(PowerMemAdapter):
     def handle_search(self, request: PlugProxyRequest) -> PlugProxyResponse:
         return self._request_json(request)
 
+    def handle_contextseek_search(
+        self,
+        client: Any,
+        request: PlugProxyRequest,
+    ) -> PlugProxyResponse:
+        return self.handle_contextseek_http_search(client, request)
+
     def is_write_request(self, request: PlugProxyRequest) -> bool:
         method = request.method.upper()
         path = "/" + request.path.strip("/")
         if method not in {"POST", "PUT", "PATCH", "DELETE"}:
             return False
         return path != MEMORIES_SEARCH_PATH
+
+    def is_search_request(self, request: PlugProxyRequest) -> bool:
+        return "/" + request.path.strip("/") == MEMORIES_SEARCH_PATH
 
     def _request_json(self, request: PlugProxyRequest) -> PlugProxyResponse:
         url = self._url_for(request.path, request.query)
