@@ -220,6 +220,10 @@ def register_config_routes(app: Any, *, config_dir: Path) -> None:
         v = mgr.redo(author="dashboard", reason=req.get("reason", "redo"))
         if v is None:
             return {"version_id": None, "restart_required": False}
+        # Mirror rollback: a redo commits a new version but must also
+        # materialize it, otherwise a server restart would load the
+        # rolled-back state (silent divergence).
+        mgr.apply(_materializer())
         return {"version_id": v.version_id, "restart_required": True}
 
     @app.get("/config/status")

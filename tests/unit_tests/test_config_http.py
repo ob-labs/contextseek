@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -56,6 +57,24 @@ def test_config_rollback_endpoint(client):
     r = client.post("/config/rollback", json={"version": "v000002", "reason": "back"})
     assert r.status_code == 200
     assert r.json()["version_id"] == "v000004"
+
+
+def test_config_redo_materializes(client, tmp_path, monkeypatch):
+    # Lazy-migrate, then set + rollback + redo, assert materialized .env reflects the redo.
+    client.get("/config")
+    client.put("/config", json={"llm_model": "gpt-4o"})
+    client.put("/config", json={"llm_model": "gpt-4o-mini"})
+    # rollback reverts to v000002 (gpt-4o), committing v000004.
+    client.post("/config/rollback", json={"version": "v000002", "reason": "back"})
+    # redo re-applies v000003's state (gpt-4o-mini), committing v000005, and
+    # must materialize it — otherwise a restart would load the rolled-back .env.
+    r = client.post("/config/redo", json={"reason": "undo rollback"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["version_id"] is not None
+    assert body["restart_required"] is True
+    env_file = Path(os.environ.get("CONTEXTSEEK_ENV_FILE", ".env"))
+    assert "LLM_MODEL=gpt-4o-mini" in env_file.read_text(encoding="utf-8")
 
 
 def test_config_status_endpoint(client):

@@ -70,6 +70,7 @@ def register_config_subparser(subparsers: Any) -> None:
     p_redo = sub.add_parser("redo", help="undo the most recent rollback")
     p_redo.add_argument("--reason", default="redo")
     p_redo.add_argument("--author", default="cli")
+    p_redo.add_argument("--no-apply", action="store_true")
 
     p_blame = sub.add_parser("blame", help="find the version that last set a key")
     p_blame.add_argument("key")
@@ -148,6 +149,9 @@ def run_config_command(args: argparse.Namespace) -> int:
             print("nothing to redo (latest version is not a rollback)")
             return 1
         print(f"redone as {v.version_id}")
+        if not args.no_apply:
+            mgr.apply(_default_materializer())
+            print("applied to .env + config.json")
         return 0
 
     if cmd == "blame":
