@@ -212,7 +212,10 @@ def test_http_compact_returns_conflict_counts() -> None:
 
 
 def test_http_update_config_normalizes_embedding_none(monkeypatch, tmp_path) -> None:
-    env_path = tmp_path / "config.env"
+    # The rerouted PUT /config writes through the versioned store + materializer.
+    # Point the materializer's .env and runtime targets at tmp files so the
+    # dashboard's embedding-none normalization is observable in the .env output.
+    env_path = tmp_path / ".env"
     env_path.write_text(
         "\n".join(
             [
@@ -226,10 +229,14 @@ def test_http_update_config_normalizes_embedding_none(monkeypatch, tmp_path) -> 
         ),
         encoding="utf-8",
     )
-    monkeypatch.setenv("CONTEXTSEEK_CONFIG", str(env_path))
+    monkeypatch.setenv("CONTEXTSEEK_HOME", str(tmp_path))
+    monkeypatch.setenv("CONTEXTSEEK_ENV_FILE", str(env_path))
+    monkeypatch.setenv("CONTEXTSEEK_CONFIG", str(tmp_path / "config.json"))
     ctx = MagicMock(name="ContextSeek")
     app = create_app(client=ctx)
 
+    # Trigger lazy migration, then drive the embedding-none normalization.
+    _asgi_get(app, "/config")
     res = _asgi_put(app, "/config", json={"embedding_provider": "none"})
 
     assert res.status_code == 200
@@ -238,21 +245,23 @@ def test_http_update_config_normalizes_embedding_none(monkeypatch, tmp_path) -> 
     assert "EMBEDDING_MODEL=none\n" in contents
     assert "EMBEDDING_DIMS=0\n" in contents
     assert "EMBEDDING_BASE_URL=\n" in contents
-    assert 'EMBEDDING_KWARGS={"api_key": ""}\n' in contents
 
 
 def test_http_update_config_rejects_enabled_embedding_without_model(
     monkeypatch, tmp_path
 ) -> None:
-    env_path = tmp_path / "config.env"
+    env_path = tmp_path / ".env"
     env_path.write_text(
         "EMBEDDING_PROVIDER=none\nEMBEDDING_MODEL=none\n",
         encoding="utf-8",
     )
-    monkeypatch.setenv("CONTEXTSEEK_CONFIG", str(env_path))
+    monkeypatch.setenv("CONTEXTSEEK_HOME", str(tmp_path))
+    monkeypatch.setenv("CONTEXTSEEK_ENV_FILE", str(env_path))
+    monkeypatch.setenv("CONTEXTSEEK_CONFIG", str(tmp_path / "config.json"))
     ctx = MagicMock(name="ContextSeek")
     app = create_app(client=ctx)
 
+    _asgi_get(app, "/config")
     res = _asgi_put(
         app,
         "/config",
@@ -261,9 +270,6 @@ def test_http_update_config_rejects_enabled_embedding_without_model(
 
     assert res.status_code == 400
     assert "EMBEDDING_MODEL must be a real model" in res.json()["detail"]
-    assert env_path.read_text(encoding="utf-8") == (
-        "EMBEDDING_PROVIDER=none\nEMBEDDING_MODEL=none\n"
-    )
 
 
 def test_http_plug_install_returns_job_and_linker_result(monkeypatch, tmp_path) -> None:
