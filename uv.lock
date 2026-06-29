@@ -475,6 +475,7 @@ name = "contextseek"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "langchain-openai" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -486,6 +487,7 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "cryptography" },
     { name = "dashscope" },
     { name = "fastapi" },
     { name = "langchain" },
@@ -510,6 +512,7 @@ dashscope = [
     { name = "langchain-community" },
 ]
 http = [
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "pydantic" },
     { name = "uvicorn" },
@@ -553,6 +556,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'appworld-eval'", specifier = ">=0.30.0" },
+    { name = "certifi", specifier = ">=2024.2.2" },
+    { name = "cryptography", marker = "extra == 'all'", specifier = ">=42.0.0" },
+    { name = "cryptography", marker = "extra == 'http'", specifier = ">=42.0.0" },
     { name = "dashscope", marker = "extra == 'all'", specifier = ">=1.20.0" },
     { name = "dashscope", marker = "extra == 'dashscope'", specifier = ">=1.20.0" },
     { name = "fastapi", marker = "extra == 'all'", specifier = ">=0.110.0" },

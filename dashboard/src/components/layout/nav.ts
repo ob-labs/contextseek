@@ -1,6 +1,7 @@
 import {
   Eye,
   GitGraph,
+  KeyRound,
   LayoutDashboard,
   PlusCircle,
   Plug,
@@ -20,6 +21,7 @@ export type PanelId =
   | "ingress"
   | "provenance"
   | "skills"
+  | "env-vault"
   | "settings";
 
 // Labels and hints are resolved via i18n at render time using the `id`
@@ -38,5 +40,6 @@ export const NAV_ITEMS: NavItem[] = [
   { id: "ingress", icon: Plug },
   { id: "provenance", icon: GitGraph },
   { id: "skills", icon: Zap },
+  { id: "env-vault", icon: KeyRound },
   { id: "settings", icon: Settings },
 ];

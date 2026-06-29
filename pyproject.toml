@@ -40,7 +40,7 @@ Issues = "https://github.com/ob-labs/contextseek/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8.2.0"]
-http = ["fastapi>=0.110.0", "uvicorn>=0.30.0", "pydantic>=2.7.0"]
+http = ["fastapi>=0.110.0", "uvicorn>=0.30.0", "pydantic>=2.7.0", "cryptography>=42.0.0"]
 langchain = ["langchain-core>=0.3.0", "langchain>=0.3.0", "langgraph>=0.2.0", "langsmith>=0.1.0"]
 openai = ["langchain-openai>=0.3.0"]
 dashscope = ["langchain-community>=0.3.0", "dashscope>=1.20.0"]
@@ -51,7 +51,7 @@ daemon = ["watchdog>=4.0"]
 seekdb = ["pyseekdb"]
 powermem = ["powermem>=1.1.1"]
 all = [
-    "fastapi>=0.110.0", "uvicorn>=0.30.0", "pydantic>=2.7.0",
+    "fastapi>=0.110.0", "uvicorn>=0.30.0", "pydantic>=2.7.0", "cryptography>=42.0.0",
     "langchain-core>=0.3.0", "langchain>=0.3.0", "langgraph>=0.2.0",
     "langchain-openai>=0.3.0",
     "langchain-community>=0.3.0", "dashscope>=1.20.0",

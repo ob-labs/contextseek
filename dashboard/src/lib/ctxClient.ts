@@ -14,6 +14,13 @@ import type {
   DeleteRequest,
   DreamRequest,
   DreamResponse,
+  EnvGenerateRequest,
+  EnvGenerateResponse,
+  EnvListTemplatesResponse,
+  EnvParseTemplateResponse,
+  EnvSeedResponse,
+  EnvVaultItemsResponse,
+  EnvVaultUpsertRequest,
   EvidenceChain,
   EvidenceChainRequest,
   ExpandRequest,
@@ -122,6 +129,12 @@ async function put<T>(path: string, payload: unknown): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function del<T>(path: string): Promise<T> {
+  const res = await fetchWithTimeout(`${BASE}${path}`, { method: "DELETE" });
+  if (!res.ok) return parseError(res);
+  return res.json() as Promise<T>;
+}
+
 async function getText(path: string): Promise<string> {
   const res = await fetchWithTimeout(`${BASE}${path}`);
   if (!res.ok) return parseError(res);
@@ -174,4 +187,22 @@ export const ctx = {
   skillTools: (req: SkillToolsRequest) => post<SkillToolsResponse>("/skill_tools", req),
   skillContext: (req: SkillContextRequest) => post<SkillContextResponse>("/skill_context", req),
   skillMd: (req: SkillMdRequest) => post<SkillMdResponse>("/skill_md", req),
+  envVault: {
+    items: () => get<EnvVaultItemsResponse>("/env-vault/items"),
+    upsert: (req: EnvVaultUpsertRequest) =>
+      put<{ status: string; count: number }>("/env-vault/items", req),
+    remove: (key: string) =>
+      del<{ status: string; deleted: boolean }>(
+        `/env-vault/items/${encodeURIComponent(key)}`,
+      ),
+    listTemplates: (path: string) =>
+      post<EnvListTemplatesResponse>("/env-vault/list-templates", { path }),
+    parseTemplate: (templatePath: string) =>
+      post<EnvParseTemplateResponse>("/env-vault/parse-template", {
+        template_path: templatePath,
+      }),
+    generate: (req: EnvGenerateRequest) =>
+      post<EnvGenerateResponse>("/env-vault/generate", req),
+    seedContextseek: () => post<EnvSeedResponse>("/env-vault/seed-contextseek", {}),
+  },
 };

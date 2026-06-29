@@ -488,3 +488,64 @@ export interface SkillMdRequest {
 export interface SkillMdResponse {
   skills: SkillMdItem[];
 }
+
+// --- Env Vault ---
+
+export interface EnvVaultItem {
+  key: string;
+  value: string;
+  is_secret: boolean;
+}
+
+export interface EnvVaultItemsResponse {
+  items: EnvVaultItem[];
+}
+
+export interface EnvVaultUpsertRequest {
+  items: { key: string; value: string }[];
+}
+
+export interface EnvTemplateKey {
+  key: string;
+  default: string;
+  value_from_vault: string;
+  is_missing: boolean;
+  is_secret: boolean;
+  comment: string;
+}
+
+export interface EnvTemplateCandidate {
+  name: string;
+  path: string;
+  key_count: number;
+}
+
+export interface EnvListTemplatesResponse {
+  root_path: string;
+  templates: EnvTemplateCandidate[];
+}
+
+export interface EnvParseTemplateResponse {
+  template_path: string;
+  keys: EnvTemplateKey[];
+}
+
+export interface EnvGenerateRequest {
+  template_path: string;
+  output_path: string;
+  values: Record<string, string>;
+  overwrite?: boolean;
+}
+
+export interface EnvGenerateResponse {
+  status: string; // "ok" | "exists"
+  output_path: string;
+  written_keys?: number;
+  synced_to_vault?: number;
+}
+
+export interface EnvSeedResponse {
+  status: string;
+  added: number;
+  removed: number;
+}

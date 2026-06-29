@@ -1031,6 +1031,10 @@ def create_app(client: ContextSeek | None = None) -> FastAPI:
 
     app.include_router(create_plug_proxy_router(ctx))
 
+    from contextseek.http.env_vault import create_env_vault_router
+
+    app.include_router(create_env_vault_router())
+
     @app.get("/plugs")
     async def plug_catalog() -> dict[str, Any]:
         return {"plugs": [_powermem_status_payload()]}

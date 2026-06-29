@@ -14,7 +14,7 @@ use std::{collections::VecDeque, time::Instant};
 use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, RunEvent, WebviewWindow};
+use tauri::{AppHandle, Manager, RunEvent, WebviewWindow, WindowEvent};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
@@ -30,9 +30,16 @@ const CRASH_RESTART_BACKOFF_MS: u64 = 1200;
 
 /// Shared runtime state: the live sidecar child and the port it serves on.
 #[derive(Default)]
+struct SidecarRuntime {
+    child: Option<CommandChild>,
+    port: u16,
+    generation: u64,
+    intentional_stop: Option<u64>,
+}
+
+#[derive(Default)]
 struct AppState {
-    child: Mutex<Option<CommandChild>>,
-    port: Mutex<u16>,
+    runtime: Mutex<SidecarRuntime>,
     crash_restarts: Mutex<VecDeque<Instant>>,
 }
 
@@ -78,11 +85,14 @@ fn spawn_sidecar(app: &AppHandle, port: u16) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("sidecar spawn failed: {e}"))?;
 
-    {
+    let generation = {
         let state = app.state::<AppState>();
-        *state.child.lock().unwrap() = Some(child);
-        *state.port.lock().unwrap() = port;
-    }
+        let mut runtime = state.runtime.lock().unwrap();
+        runtime.generation = runtime.generation.saturating_add(1);
+        runtime.child = Some(child);
+        runtime.port = port;
+        runtime.generation
+    };
 
     // Drain sidecar output; surface unexpected termination to the UI.
     let app_for_events = app.clone();
@@ -94,9 +104,23 @@ fn spawn_sidecar(app: &AppHandle, port: u16) -> Result<(), String> {
                 }
                 CommandEvent::Terminated(payload) => {
                     eprintln!("[sidecar] terminated: {:?}", payload.code);
-                    {
+                    let should_auto_restart_after_exit = {
                         let state = app_for_events.state::<AppState>();
-                        *state.child.lock().unwrap() = None;
+                        let mut runtime = state.runtime.lock().unwrap();
+                        if runtime.generation != generation {
+                            false
+                        } else {
+                            runtime.child = None;
+                            if runtime.intentional_stop == Some(generation) {
+                                runtime.intentional_stop = None;
+                                false
+                            } else {
+                                true
+                            }
+                        }
+                    };
+                    if !should_auto_restart_after_exit {
+                        break;
                     }
                     if let Some(win) = app_for_events.get_webview_window("main") {
                         let _ = win.eval(
@@ -121,7 +145,7 @@ fn spawn_sidecar(app: &AppHandle, port: u16) -> Result<(), String> {
 
 fn current_port(app: &AppHandle) -> u16 {
     let state = app.state::<AppState>();
-    let port = *state.port.lock().unwrap();
+    let port = state.runtime.lock().unwrap().port;
     port
 }
 
@@ -219,8 +243,14 @@ fn start_backend(app: &AppHandle) {
 /// Terminate the sidecar child if running.
 fn kill_sidecar(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let port = *state.port.lock().unwrap();
-    let child = state.child.lock().unwrap().take();
+    let (port, child) = {
+        let mut runtime = state.runtime.lock().unwrap();
+        let child = runtime.child.take();
+        if child.is_some() {
+            runtime.intentional_stop = Some(runtime.generation);
+        }
+        (runtime.port, child)
+    };
     if let Some(child) = child {
         // Ask the sidecar to shutdown gracefully first; if it does not exit
         // within the grace period, force-kill the process.
@@ -311,6 +341,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec![]),
@@ -326,9 +357,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building ContextSeek desktop app")
         .run(|app, event| match event {
-            // Keep running in the tray when the last window is closed.
-            RunEvent::ExitRequested { api, .. } => {
-                api.prevent_exit();
+            // Keep running in the tray when the main window is closed.
+            RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "main" => {
+                api.prevent_close();
+                if let Some(w) = app.get_webview_window(&label) {
+                    let _ = w.hide();
+                }
             }
             RunEvent::Exit => {
                 kill_sidecar(app);

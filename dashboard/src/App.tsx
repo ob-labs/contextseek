@@ -5,6 +5,7 @@ import type { PanelId } from "@/components/layout/nav";
 import { NavContext, type NavTarget } from "@/context/NavContext";
 import { ScopeProvider } from "@/context/ScopeContext";
 import { BrowsePanel } from "@/panels/BrowsePanel";
+import { EnvVaultPanel } from "@/panels/EnvVaultPanel";
 import { EvolutionPanel } from "@/panels/EvolutionPanel";
 import { IngressPanel } from "@/panels/IngressPanel";
 import { OverviewPanel } from "@/panels/OverviewPanel";
@@ -45,6 +46,7 @@ export function App() {
             {panel === "ingress" && <IngressPanel />}
             {panel === "provenance" && <ProvenancePanel initialItemId={provenanceItemId} />}
             {panel === "skills" && <SkillsPanel />}
+            {panel === "env-vault" && <EnvVaultPanel />}
             {panel === "settings" && <SettingsPanel />}
           </AppLayout>
         </div>
